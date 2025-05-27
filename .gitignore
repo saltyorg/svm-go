@@ -1,0 +1,7 @@
+# ide and editor files
+/.idea/
+/.vscode/
+
+# build and binary files
+/dist/
+/vendor/
