@@ -68,6 +68,24 @@ func (c *Cache) Get(key string) (cache.Record, bool) {
 	return cloneRecord(stored.record), true
 }
 
+// GetReadonly returns a record by key and may alias payload bytes to cache storage.
+func (c *Cache) GetReadonly(key string) (cache.Record, bool) {
+	if c == nil || key == "" {
+		return cache.Record{}, false
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	stored, ok := c.entries[key]
+	if !ok {
+		return cache.Record{}, false
+	}
+
+	c.recency.MoveToFront(stored.element)
+	return stored.record, true
+}
+
 // Set upserts a record and updates estimated memory accounting.
 func (c *Cache) Set(key string, record cache.Record) {
 	if c == nil || key == "" {

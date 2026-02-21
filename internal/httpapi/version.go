@@ -18,6 +18,9 @@ type versionService interface {
 type clientIPResolver func(ctx *fasthttp.RequestCtx) string
 
 var refreshTrueValue = []byte("true")
+var newlineValue = []byte{'\n'}
+var upstreamStatusHeaderKey = []byte("X-Upstream-Status")
+var upstreamStatusZeroValue = []byte("0")
 
 // NewVersionHandler builds the /version endpoint handler.
 func NewVersionHandler(service versionService, resolveClientIP clientIPResolver) fasthttp.RequestHandler {
@@ -59,7 +62,7 @@ func handleVersion(ctx *fasthttp.RequestCtx, service versionService, resolveClie
 	}
 	ctx.Response.Header.Set("X-Cache", cacheStatus)
 	ctx.Response.Header.Set("X-Cache-Key", response.CacheKey)
-	ctx.Response.Header.Set("X-Upstream-Status", strconv.Itoa(response.UpstreamStatus))
+	setUpstreamStatusHeader(&ctx.Response.Header, response.UpstreamStatus)
 
 	if response.StatusCode == 0 {
 		response.StatusCode = fasthttp.StatusOK
@@ -70,5 +73,25 @@ func handleVersion(ctx *fasthttp.RequestCtx, service versionService, resolveClie
 
 func writeJSON(ctx *fasthttp.RequestCtx, statusCode int, payload any) {
 	ctx.SetStatusCode(statusCode)
+	if body, ok := payload.(json.RawMessage); ok && len(body) > 0 {
+		_, _ = ctx.Write(body)
+		_, _ = ctx.Write(newlineValue)
+		return
+	}
+
 	_ = json.NewEncoder(ctx).Encode(payload)
+}
+
+func setUpstreamStatusHeader(header *fasthttp.ResponseHeader, status int) {
+	if header == nil {
+		return
+	}
+	if status == 0 {
+		header.SetBytesKV(upstreamStatusHeaderKey, upstreamStatusZeroValue)
+		return
+	}
+
+	var scratch [12]byte
+	value := strconv.AppendInt(scratch[:0], int64(status), 10)
+	header.SetBytesKV(upstreamStatusHeaderKey, value)
 }

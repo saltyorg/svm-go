@@ -16,6 +16,11 @@ type L1Store interface {
 	Set(key string, record Record)
 }
 
+// L1ReadonlyStore defines an optional read-only retrieval path that may return aliased payload bytes.
+type L1ReadonlyStore interface {
+	GetReadonly(key string) (Record, bool)
+}
+
 // L2Store defines the persistence/hydration surface used by the facade.
 type L2Store interface {
 	Get(ctx context.Context, key string) (*Record, bool, error)
@@ -52,6 +57,45 @@ func (f *Facade) Get(ctx context.Context, key string) (Record, bool, error) {
 		record, hit := f.l1.Get(key)
 		if hit {
 			return record, true, nil
+		}
+	}
+
+	if f == nil || f.l2 == nil {
+		return Record{}, false, nil
+	}
+
+	record, hit, err := f.l2.Get(ctx, key)
+	if err != nil {
+		return Record{}, false, err
+	}
+	if !hit || record == nil {
+		return Record{}, false, nil
+	}
+
+	if f.l1 != nil {
+		f.l1.Set(key, *record)
+	}
+
+	return *record, true, nil
+}
+
+// GetReadonly reads from L1 first and may return payload bytes aliased to cache storage on hit.
+func (f *Facade) GetReadonly(ctx context.Context, key string) (Record, bool, error) {
+	if key == "" {
+		return Record{}, false, ErrCacheFacadeKeyRequired
+	}
+
+	if f != nil && f.l1 != nil {
+		if l1Readonly, ok := f.l1.(L1ReadonlyStore); ok {
+			record, hit := l1Readonly.GetReadonly(key)
+			if hit {
+				return record, true, nil
+			}
+		} else {
+			record, hit := f.l1.Get(key)
+			if hit {
+				return record, true, nil
+			}
 		}
 	}
 

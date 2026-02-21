@@ -54,6 +54,10 @@ type CacheStore interface {
 	Set(key string, record cache.Record) (bool, error)
 }
 
+type readonlyCacheStore interface {
+	GetReadonly(ctx context.Context, key string) (cache.Record, bool, error)
+}
+
 // HitSignalRecorder defines non-blocking hit signal behavior for active-key tracking.
 type HitSignalRecorder interface {
 	RecordHit(key string, hitAt time.Time) bool
@@ -82,6 +86,7 @@ type Service struct {
 	policy         cache.Policy
 	now            func() time.Time
 	refreshGroup   *backgroundRefreshGroup
+	requestPrep    *requestPrepCache
 }
 
 // NewService builds a version service with safe defaults for optional dependencies.
@@ -119,6 +124,7 @@ func NewService(
 		policy:         policy,
 		now:            time.Now,
 		refreshGroup:   newBackgroundRefreshGroup(),
+		requestPrep:    newRequestPrepCache(0),
 	}
 }
 
@@ -132,7 +138,8 @@ func (s *Service) SetMetrics(metrics *observability.Metrics) {
 
 // Handle resolves a version payload from cache or upstream and returns a response envelope.
 func (s *Service) Handle(ctx context.Context, request Request) Response {
-	parsedURL, err := security.ParseHTTPSURL(request.RawURL)
+	prepared := s.prepareRequest(request.RawURL)
+	err := prepared.err
 	if err != nil {
 		s.logger.Warn(
 			"invalid parameter",
@@ -150,28 +157,8 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			CacheStatus: CacheStatusBypass,
 		}
 	}
-	if !s.isAllowedHost(parsedURL.Hostname()) {
-		s.logger.Warn(
-			"invalid parameter",
-			observability.String("ip", request.ClientIP),
-			observability.String("error", security.ErrUpstreamHostNotAllowed.Error()),
-			observability.String("uri", request.URI),
-		)
-
-		return Response{
-			StatusCode: http.StatusBadRequest,
-			Body: ErrorResponse{
-				Error:  "Invalid parameter",
-				Detail: security.ErrUpstreamHostNotAllowed.Error(),
-			},
-			CacheStatus: CacheStatusBypass,
-		}
-	}
-	urlToFetch := parsedURL.String()
-	cacheKey, keyErr := cache.KeyFromParsedURL(parsedURL)
-	if keyErr != nil {
-		cacheKey = urlToFetch
-	}
+	urlToFetch := prepared.urlToFetch
+	cacheKey := prepared.cacheKey
 
 	cachedRecord, cacheHit, err := s.getFromCache(ctx, cacheKey)
 	if err != nil {
@@ -399,6 +386,38 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 	}
 }
 
+func (s *Service) prepareRequest(rawURL string) preparedRequest {
+	if s == nil || s.requestPrep == nil {
+		return prepareRequest(rawURL, nil)
+	}
+
+	return s.requestPrep.GetOrPrepare(rawURL, func(value string) preparedRequest {
+		return prepareRequest(value, s.isAllowedHost)
+	})
+}
+
+func prepareRequest(rawURL string, hostAllowed func(host string) bool) preparedRequest {
+	parsedURL, err := security.ParseHTTPSURL(rawURL)
+	if err != nil {
+		return preparedRequest{err: err}
+	}
+
+	if hostAllowed != nil && !hostAllowed(parsedURL.Hostname()) {
+		return preparedRequest{err: security.ErrUpstreamHostNotAllowed}
+	}
+
+	urlToFetch := parsedURL.String()
+	cacheKey, keyErr := cache.KeyFromParsedURL(parsedURL)
+	if keyErr != nil {
+		cacheKey = urlToFetch
+	}
+
+	return preparedRequest{
+		urlToFetch: urlToFetch,
+		cacheKey:   cacheKey,
+	}
+}
+
 // RefreshInBackground schedules an async conditional refresh deduped by cache key.
 func (s *Service) RefreshInBackground(request Request) bool {
 	if s == nil {
@@ -437,6 +456,9 @@ func (s *Service) RefreshByKey(cacheKey string) bool {
 func (s *Service) getFromCache(ctx context.Context, key string) (cache.Record, bool, error) {
 	if s == nil || s.cache == nil {
 		return cache.Record{}, false, nil
+	}
+	if readonly, ok := s.cache.(readonlyCacheStore); ok {
+		return readonly.GetReadonly(ctx, key)
 	}
 
 	return s.cache.Get(ctx, key)
