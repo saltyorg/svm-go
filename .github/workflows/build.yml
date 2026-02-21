@@ -8,6 +8,10 @@ on:
       - '*'
   workflow_dispatch:
 
+concurrency:
+  group: build-workflow
+  cancel-in-progress: false
+
 jobs:
   docker:
     runs-on: ubuntu-latest
