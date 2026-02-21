@@ -1,7 +1,16 @@
 package httpapi
 
 import (
+	"bytes"
+
 	"github.com/valyala/fasthttp"
+)
+
+var (
+	versionPath = []byte("/version")
+	pingPath    = []byte("/ping")
+	healthPath  = []byte("/healthz")
+	metricsPath = []byte("/metrics")
 )
 
 // AccessLogHook runs after the router finishes writing the response.
@@ -14,26 +23,27 @@ func NewRouter(
 	routes := newHandlers(versionHandler, pingHandler, healthHandler, metricsHandler)
 
 	return func(ctx *fasthttp.RequestCtx) {
-		switch string(ctx.Path()) {
-		case "/version":
+		path := ctx.Path()
+		switch {
+		case bytes.Equal(path, versionPath):
 			if !ctx.IsGet() {
 				writeMethodNotAllowed(ctx)
 				return
 			}
 			routes.version(ctx)
-		case "/ping":
+		case bytes.Equal(path, pingPath):
 			if !ctx.IsGet() {
 				writeMethodNotAllowed(ctx)
 				return
 			}
 			routes.ping(ctx)
-		case "/healthz":
+		case bytes.Equal(path, healthPath):
 			if !ctx.IsGet() {
 				writeMethodNotAllowed(ctx)
 				return
 			}
 			routes.health(ctx)
-		case "/metrics":
+		case bytes.Equal(path, metricsPath):
 			if !ctx.IsGet() {
 				writeMethodNotAllowed(ctx)
 				return

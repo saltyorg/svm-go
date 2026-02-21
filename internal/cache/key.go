@@ -31,6 +31,35 @@ func NormalizeURL(rawURL string) (string, error) {
 		return "", ErrCacheURLInvalid
 	}
 
+	return normalizeParsedURL(parsed), nil
+}
+
+// KeyFromURL returns a deterministic Redis-safe cache key for a URL.
+func KeyFromURL(rawURL string) (string, error) {
+	normalized, err := NormalizeURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	return keyFromNormalizedURL(normalized), nil
+}
+
+// KeyFromParsedURL returns a deterministic Redis-safe cache key from an already parsed URL.
+func KeyFromParsedURL(parsedURL *url.URL) (string, error) {
+	if parsedURL == nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return "", ErrCacheURLInvalid
+	}
+
+	return keyFromNormalizedURL(normalizeParsedURL(parsedURL)), nil
+}
+
+func keyFromNormalizedURL(normalized string) string {
+	sum := sha256.Sum256([]byte(normalized))
+	return cacheKeyVersionPrefix + hex.EncodeToString(sum[:])
+}
+
+func normalizeParsedURL(parsedURL *url.URL) string {
+	parsed := *parsedURL
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	parsed.Host = normalizeHost(parsed.Scheme, parsed.Hostname(), parsed.Port())
 	parsed.Fragment = ""
@@ -45,18 +74,7 @@ func NormalizeURL(rawURL string) (string, error) {
 	}
 	parsed.RawQuery = query.Encode()
 
-	return parsed.String(), nil
-}
-
-// KeyFromURL returns a deterministic Redis-safe cache key for a URL.
-func KeyFromURL(rawURL string) (string, error) {
-	normalized, err := NormalizeURL(rawURL)
-	if err != nil {
-		return "", err
-	}
-
-	sum := sha256.Sum256([]byte(normalized))
-	return cacheKeyVersionPrefix + hex.EncodeToString(sum[:]), nil
+	return parsed.String()
 }
 
 func normalizeHost(scheme, hostname, port string) string {

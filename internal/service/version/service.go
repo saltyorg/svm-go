@@ -61,7 +61,7 @@ type HitSignalRecorder interface {
 
 // UpstreamClient defines outbound client behavior used by the service.
 type UpstreamClient interface {
-	Get(ctx context.Context, url string, headers map[string]string) (*http.Response, error)
+	Get(ctx context.Context, url, token, etag string) (*http.Response, error)
 	ObserveRateLimit(token string, response *http.Response, observer upstreamgithub.RateLimitedTokenObserver)
 }
 
@@ -71,16 +71,17 @@ type tokenRemainingObserver interface {
 
 // Service owns the /version business flow.
 type Service struct {
-	cache         CacheStore
-	hitRecorder   HitSignalRecorder
-	tokenProvider upstreamgithub.TokenProvider
-	upstream      UpstreamClient
-	logger        *observability.Logger
-	metrics       *observability.Metrics
-	allowedHosts  []string
-	policy        cache.Policy
-	now           func() time.Time
-	refreshGroup  *backgroundRefreshGroup
+	cache          CacheStore
+	hitRecorder    HitSignalRecorder
+	tokenProvider  upstreamgithub.TokenProvider
+	upstream       UpstreamClient
+	logger         *observability.Logger
+	metrics        *observability.Metrics
+	allowedHosts   []string
+	allowedHostSet map[string]struct{}
+	policy         cache.Policy
+	now            func() time.Time
+	refreshGroup   *backgroundRefreshGroup
 }
 
 // NewService builds a version service with safe defaults for optional dependencies.
@@ -108,15 +109,16 @@ func NewService(
 	}
 
 	return &Service{
-		cache:         cacheStore,
-		hitRecorder:   hitRecorder,
-		tokenProvider: tokenProvider,
-		upstream:      upstream,
-		logger:        logger,
-		allowedHosts:  append([]string(nil), allowedHosts...),
-		policy:        policy,
-		now:           time.Now,
-		refreshGroup:  newBackgroundRefreshGroup(),
+		cache:          cacheStore,
+		hitRecorder:    hitRecorder,
+		tokenProvider:  tokenProvider,
+		upstream:       upstream,
+		logger:         logger,
+		allowedHosts:   append([]string(nil), allowedHosts...),
+		allowedHostSet: buildAllowedHostSet(allowedHosts),
+		policy:         policy,
+		now:            time.Now,
+		refreshGroup:   newBackgroundRefreshGroup(),
 	}
 }
 
@@ -130,7 +132,7 @@ func (s *Service) SetMetrics(metrics *observability.Metrics) {
 
 // Handle resolves a version payload from cache or upstream and returns a response envelope.
 func (s *Service) Handle(ctx context.Context, request Request) Response {
-	parsedURL, err := security.ParseHTTPSURLWithAllowlist(request.RawURL, s.allowedHosts)
+	parsedURL, err := security.ParseHTTPSURL(request.RawURL)
 	if err != nil {
 		s.logger.Warn(
 			"invalid parameter",
@@ -148,8 +150,25 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			CacheStatus: CacheStatusBypass,
 		}
 	}
+	if !s.isAllowedHost(parsedURL.Hostname()) {
+		s.logger.Warn(
+			"invalid parameter",
+			observability.String("ip", request.ClientIP),
+			observability.String("error", security.ErrUpstreamHostNotAllowed.Error()),
+			observability.String("uri", request.URI),
+		)
+
+		return Response{
+			StatusCode: http.StatusBadRequest,
+			Body: ErrorResponse{
+				Error:  "Invalid parameter",
+				Detail: security.ErrUpstreamHostNotAllowed.Error(),
+			},
+			CacheStatus: CacheStatusBypass,
+		}
+	}
 	urlToFetch := parsedURL.String()
-	cacheKey, keyErr := cache.KeyFromURL(urlToFetch)
+	cacheKey, keyErr := cache.KeyFromParsedURL(parsedURL)
 	if keyErr != nil {
 		cacheKey = urlToFetch
 	}
@@ -201,12 +220,11 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 	}
 
 	token := s.tokenProvider.NextToken()
-	headers := upstreamgithub.BuildRequestHeaders(token, etag)
 	startedAt := s.now()
 
 	s.incCacheMiss()
 	s.incUpstreamRequest()
-	resp, err := s.upstream.Get(ctx, urlToFetch, headers)
+	resp, err := s.upstream.Get(ctx, urlToFetch, token, etag)
 	if err != nil {
 		s.incUpstreamError()
 		s.logger.Warn(
@@ -227,15 +245,6 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 		}
 	}
 	defer resp.Body.Close()
-
-	s.logger.Info(
-		"upstream response",
-		observability.String("method", http.MethodGet),
-		observability.String("url", urlToFetch),
-		observability.String("protocol", resp.Proto),
-		observability.Int("status", resp.StatusCode),
-		observability.String("status_text", resp.Status),
-	)
 
 	remainingHeader := resp.Header.Get("X-RateLimit-Remaining")
 	remaining := remainingHeader
@@ -396,12 +405,15 @@ func (s *Service) RefreshInBackground(request Request) bool {
 		return false
 	}
 
-	parsedURL, err := security.ParseHTTPSURLWithAllowlist(request.RawURL, s.allowedHosts)
+	parsedURL, err := security.ParseHTTPSURL(request.RawURL)
 	if err != nil {
 		return false
 	}
+	if !s.isAllowedHost(parsedURL.Hostname()) {
+		return false
+	}
 	urlToFetch := parsedURL.String()
-	cacheKey, keyErr := cache.KeyFromURL(urlToFetch)
+	cacheKey, keyErr := cache.KeyFromParsedURL(parsedURL)
 	if keyErr != nil {
 		cacheKey = urlToFetch
 	}
@@ -567,9 +579,8 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 
 	now := s.now().UTC()
 	token := s.tokenProvider.NextToken()
-	headers := upstreamgithub.BuildRequestHeaders(token, record.ETag)
 
-	resp, err := s.upstream.Get(context.Background(), urlToFetch, headers)
+	resp, err := s.upstream.Get(context.Background(), urlToFetch, token, record.ETag)
 	if err != nil {
 		s.logger.Warn("background refresh failed", observability.String("error", err.Error()))
 		return
@@ -604,6 +615,40 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 		}
 		_, _ = s.setToCache(cacheKey, updated)
 	}
+}
+
+func buildAllowedHostSet(allowedHosts []string) map[string]struct{} {
+	if len(allowedHosts) == 0 {
+		return nil
+	}
+
+	hostSet := make(map[string]struct{}, len(allowedHosts))
+	for _, host := range allowedHosts {
+		normalized := strings.ToLower(strings.TrimSpace(host))
+		if normalized == "" {
+			continue
+		}
+		hostSet[normalized] = struct{}{}
+	}
+	if len(hostSet) == 0 {
+		return nil
+	}
+
+	return hostSet
+}
+
+func (s *Service) isAllowedHost(host string) bool {
+	if len(s.allowedHostSet) == 0 {
+		return true
+	}
+
+	normalizedHost := strings.ToLower(strings.TrimSpace(host))
+	if normalizedHost == "" {
+		return false
+	}
+
+	_, ok := s.allowedHostSet[normalizedHost]
+	return ok
 }
 
 type backgroundRefreshGroup struct {

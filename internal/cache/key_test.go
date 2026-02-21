@@ -2,6 +2,7 @@ package cache
 
 import (
 	"errors"
+	"net/url"
 	"regexp"
 	"testing"
 )
@@ -53,6 +54,42 @@ func TestKeyFromURLIsDeterministicAndRedisSafe(t *testing.T) {
 	redisSafe := regexp.MustCompile(`^[a-z0-9:]+$`)
 	if !redisSafe.MatchString(first) {
 		t.Fatalf("expected redis-safe cache key format, got %q", first)
+	}
+}
+
+func TestKeyFromParsedURLMatchesKeyFromURL(t *testing.T) {
+	t.Parallel()
+
+	rawURL := "https://api.github.com/repos/acme/widgets/releases/latest?b=2&a=1"
+	fromRawURL, err := KeyFromURL(rawURL)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	fromParsedURL, err := KeyFromParsedURL(parsedURL)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if fromRawURL != fromParsedURL {
+		t.Fatalf("expected equal keys, got %q and %q", fromRawURL, fromParsedURL)
+	}
+}
+
+func TestKeyFromParsedURLReturnsErrorForInvalidURL(t *testing.T) {
+	t.Parallel()
+
+	if _, err := KeyFromParsedURL(nil); !errors.Is(err, ErrCacheURLInvalid) {
+		t.Fatalf("expected ErrCacheURLInvalid for nil URL, got %v", err)
+	}
+
+	parsedURL := &url.URL{Scheme: "https"}
+	if _, err := KeyFromParsedURL(parsedURL); !errors.Is(err, ErrCacheURLInvalid) {
+		t.Fatalf("expected ErrCacheURLInvalid for URL missing host, got %v", err)
 	}
 }
 

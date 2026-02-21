@@ -1,7 +1,9 @@
 package github
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -58,25 +60,46 @@ func TestClientObserveRateLimitIgnoresNonRateLimitedStatuses(t *testing.T) {
 	}
 }
 
-func TestBuildRequestHeadersIncludesAuthorizationAndIfNoneMatch(t *testing.T) {
+func TestClientGetSetsAuthorizationAndIfNoneMatch(t *testing.T) {
 	t.Parallel()
 
-	headers := BuildRequestHeaders("token-a", `"etag-1"`)
+	var gotAuthorization string
+	var gotIfNoneMatch string
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		gotAuthorization = request.Header.Get("Authorization")
+		gotIfNoneMatch = request.Header.Get("If-None-Match")
+	}))
+	defer server.Close()
 
-	if headers["Authorization"] != "token token-a" {
-		t.Fatalf("expected authorization header %q, got %q", "token token-a", headers["Authorization"])
+	client := NewClient()
+	_, err := client.Get(context.Background(), server.URL, "token-a", `"etag-1"`)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
 	}
-	if headers["If-None-Match"] != `"etag-1"` {
-		t.Fatalf("expected If-None-Match header %q, got %q", `"etag-1"`, headers["If-None-Match"])
+
+	if gotAuthorization != "token token-a" {
+		t.Fatalf("expected authorization header %q, got %q", "token token-a", gotAuthorization)
+	}
+	if gotIfNoneMatch != `"etag-1"` {
+		t.Fatalf("expected If-None-Match header %q, got %q", `"etag-1"`, gotIfNoneMatch)
 	}
 }
 
-func TestBuildRequestHeadersOmitsIfNoneMatchWhenETagEmpty(t *testing.T) {
+func TestClientGetOmitsIfNoneMatchWhenETagEmpty(t *testing.T) {
 	t.Parallel()
 
-	headers := BuildRequestHeaders("token-a", "")
+	var gotIfNoneMatch string
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		gotIfNoneMatch = request.Header.Get("If-None-Match")
+	}))
+	defer server.Close()
 
-	if _, ok := headers["If-None-Match"]; ok {
-		t.Fatal("expected If-None-Match header to be omitted when etag is empty")
+	client := NewClient()
+	_, err := client.Get(context.Background(), server.URL, "token-a", "")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if gotIfNoneMatch != "" {
+		t.Fatalf("expected empty If-None-Match header, got %q", gotIfNoneMatch)
 	}
 }

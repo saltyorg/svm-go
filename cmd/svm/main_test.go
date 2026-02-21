@@ -238,7 +238,7 @@ type fakeMetricsUpstream struct {
 	body       string
 }
 
-func (f *fakeMetricsUpstream) Get(_ context.Context, _ string, _ map[string]string) (*http.Response, error) {
+func (f *fakeMetricsUpstream) Get(_ context.Context, _ string, _ string, _ string) (*http.Response, error) {
 	statusCode := f.statusCode
 	if statusCode == 0 {
 		statusCode = http.StatusOK

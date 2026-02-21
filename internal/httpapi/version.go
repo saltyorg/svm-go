@@ -1,10 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strconv"
-	"strings"
 
 	versionservice "svm/internal/service/version"
 
@@ -16,6 +16,8 @@ type versionService interface {
 }
 
 type clientIPResolver func(ctx *fasthttp.RequestCtx) string
+
+var refreshTrueValue = []byte("true")
 
 // NewVersionHandler builds the /version endpoint handler.
 func NewVersionHandler(service versionService, resolveClientIP clientIPResolver) fasthttp.RequestHandler {
@@ -45,13 +47,10 @@ func handleVersion(ctx *fasthttp.RequestCtx, service versionService, resolveClie
 	}
 
 	response := service.Handle(ctx, versionservice.Request{
-		RawURL:   string(ctx.QueryArgs().Peek("url")),
-		ClientIP: clientIP,
-		URI:      string(ctx.Path()),
-		ForceRefresh: strings.EqualFold(
-			string(ctx.QueryArgs().Peek("refresh")),
-			"true",
-		),
+		RawURL:       string(ctx.QueryArgs().Peek("url")),
+		ClientIP:     clientIP,
+		URI:          "/version",
+		ForceRefresh: bytes.EqualFold(ctx.QueryArgs().Peek("refresh"), refreshTrueValue),
 	})
 
 	cacheStatus := response.CacheStatus

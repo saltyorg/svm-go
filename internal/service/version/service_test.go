@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -1151,10 +1150,14 @@ func (p *countingTokenProvider) NextToken() string {
 	return p.token
 }
 
-func (f *fakeUpstreamClient) Get(_ context.Context, _ string, headers map[string]string) (*http.Response, error) {
+func (f *fakeUpstreamClient) Get(_ context.Context, _ string, token, etag string) (*http.Response, error) {
 	f.getCalls++
-	f.lastHeaders = make(map[string]string, len(headers))
-	maps.Copy(f.lastHeaders, headers)
+	f.lastHeaders = map[string]string{
+		"Authorization": "token " + token,
+	}
+	if etag != "" {
+		f.lastHeaders["If-None-Match"] = etag
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1230,11 +1233,15 @@ func newBlockingUpstreamClient(responseCode int, responseBody string) *blockingU
 	}
 }
 
-func (b *blockingUpstreamClient) Get(_ context.Context, _ string, headers map[string]string) (*http.Response, error) {
+func (b *blockingUpstreamClient) Get(_ context.Context, _ string, token, etag string) (*http.Response, error) {
 	b.mu.Lock()
 	b.getCalls++
-	b.lastHeaders = make(map[string]string, len(headers))
-	maps.Copy(b.lastHeaders, headers)
+	b.lastHeaders = map[string]string{
+		"Authorization": "token " + token,
+	}
+	if etag != "" {
+		b.lastHeaders["If-None-Match"] = etag
+	}
 	if b.getCalls == 1 {
 		close(b.started)
 	}

@@ -51,7 +51,7 @@ func (f *Facade) Get(ctx context.Context, key string) (Record, bool, error) {
 	if f != nil && f.l1 != nil {
 		record, hit := f.l1.Get(key)
 		if hit {
-			return cloneFacadeRecord(record), true, nil
+			return record, true, nil
 		}
 	}
 
@@ -67,12 +67,11 @@ func (f *Facade) Get(ctx context.Context, key string) (Record, bool, error) {
 		return Record{}, false, nil
 	}
 
-	cloned := cloneFacadeRecord(*record)
 	if f.l1 != nil {
-		f.l1.Set(key, cloned)
+		f.l1.Set(key, *record)
 	}
 
-	return cloned, true, nil
+	return *record, true, nil
 }
 
 // Set writes to L1 first and then attempts async write-behind enqueue.
@@ -84,15 +83,14 @@ func (f *Facade) Set(key string, record Record) (bool, error) {
 		return false, nil
 	}
 
-	cloned := cloneFacadeRecord(record)
 	if f.l1 != nil {
-		f.l1.Set(key, cloned)
+		f.l1.Set(key, record)
 	}
 	if f.writeBehind == nil {
 		return false, nil
 	}
 
-	return f.writeBehind.Enqueue(key, cloneFacadeRecord(cloned)), nil
+	return f.writeBehind.Enqueue(key, record), nil
 }
 
 func cloneFacadeRecord(record Record) Record {
