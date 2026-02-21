@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - main
-  release:
-    types:
-      - published
+    tags:
+      - '*'
   workflow_dispatch:
 
 jobs:
@@ -33,7 +32,9 @@ jobs:
         run: |
           {
             echo "tags<<EOF"
-            if [ "${{ github.event_name }}" = "release" ]; then
+            if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+              tag="${GITHUB_REF#refs/tags/}"
+              echo "saltydk/svm:${tag}"
               echo "saltydk/svm:latest"
             else
               echo "saltydk/svm:dev"
