@@ -235,12 +235,11 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 
 	remainingHeader := resp.Header.Get("X-RateLimit-Remaining")
 	remaining := remainingHeader
-	if remaining == "" {
+	if remainingValue, ok := parseRateLimitRemaining(remainingHeader); ok {
+		remaining = strconv.Itoa(remainingValue)
+		s.observeRateLimitRemaining(token, remainingValue)
+	} else if remaining == "" {
 		remaining = "unknown"
-	} else if usageObserver, ok := s.tokenProvider.(tokenRemainingObserver); ok {
-		if remainingValue, convErr := strconv.Atoi(remainingHeader); convErr == nil {
-			usageObserver.ObserveTokenRemaining(token, remainingValue)
-		}
 	}
 	if cooldownObserver, ok := s.tokenProvider.(upstreamgithub.RateLimitedTokenObserver); ok {
 		s.upstream.ObserveRateLimit(token, resp, cooldownObserver)
@@ -507,8 +506,33 @@ func (s *Service) incUpstreamError() {
 	s.metrics.IncUpstreamError()
 }
 
+func (s *Service) observeRateLimitRemaining(token string, remaining int) {
+	if s == nil {
+		return
+	}
+
+	if usageObserver, ok := s.tokenProvider.(tokenRemainingObserver); ok {
+		usageObserver.ObserveTokenRemaining(token, remaining)
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveRateLimitRemaining(remaining)
+	}
+}
+
 func payloadResponseBody(payload []byte) json.RawMessage {
 	return json.RawMessage(payload)
+}
+
+func parseRateLimitRemaining(raw string) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, false
+	}
+	if value < 0 {
+		value = 0
+	}
+
+	return value, true
 }
 
 func isNegativeCacheableStatus(statusCode int) bool {
@@ -612,6 +636,9 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 	defer resp.Body.Close()
 	if resp.StatusCode >= http.StatusBadRequest {
 		s.incUpstreamError()
+	}
+	if remainingValue, ok := parseRateLimitRemaining(resp.Header.Get("X-RateLimit-Remaining")); ok {
+		s.observeRateLimitRemaining(token, remainingValue)
 	}
 
 	if cooldownObserver, ok := s.tokenProvider.(upstreamgithub.RateLimitedTokenObserver); ok {

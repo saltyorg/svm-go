@@ -2,6 +2,8 @@ package observability
 
 import "sync/atomic"
 
+const unknownRateLimitRemaining int64 = -1
+
 // Metrics stores low-cardinality in-memory counters for request and cache flows.
 type Metrics struct {
 	cacheHits        atomic.Uint64
@@ -9,6 +11,7 @@ type Metrics struct {
 	revalidateRuns   atomic.Uint64
 	upstreamRequests atomic.Uint64
 	upstreamErrors   atomic.Uint64
+	rateLimitRemain  atomic.Int64
 }
 
 // Snapshot is a point-in-time read of all metrics counters.
@@ -18,11 +21,14 @@ type Snapshot struct {
 	RevalidateRuns   uint64
 	UpstreamRequests uint64
 	UpstreamErrors   uint64
+	RateLimitRemain  int64
 }
 
 // NewMetrics constructs an empty counter set.
 func NewMetrics() *Metrics {
-	return &Metrics{}
+	metrics := &Metrics{}
+	metrics.rateLimitRemain.Store(unknownRateLimitRemaining)
+	return metrics
 }
 
 // IncCacheHit increments cache-hit counter.
@@ -65,10 +71,24 @@ func (m *Metrics) IncUpstreamError() {
 	m.upstreamErrors.Add(1)
 }
 
+// ObserveRateLimitRemaining stores the latest observed upstream rate-limit remaining value.
+func (m *Metrics) ObserveRateLimitRemaining(remaining int) {
+	if m == nil {
+		return
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	m.rateLimitRemain.Store(int64(remaining))
+}
+
 // Snapshot returns an atomic read of all counters.
 func (m *Metrics) Snapshot() Snapshot {
 	if m == nil {
-		return Snapshot{}
+		return Snapshot{
+			RateLimitRemain: unknownRateLimitRemaining,
+		}
 	}
 
 	return Snapshot{
@@ -77,5 +97,6 @@ func (m *Metrics) Snapshot() Snapshot {
 		RevalidateRuns:   m.revalidateRuns.Load(),
 		UpstreamRequests: m.upstreamRequests.Load(),
 		UpstreamErrors:   m.upstreamErrors.Load(),
+		RateLimitRemain:  m.rateLimitRemain.Load(),
 	}
 }

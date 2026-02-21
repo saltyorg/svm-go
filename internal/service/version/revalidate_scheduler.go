@@ -305,6 +305,11 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 			observability.Any("cycle_upstream_requests", upstreamRequestsDelta),
 			observability.Any("cycle_upstream_errors", upstreamErrorsDelta),
 		)
+		if snapshot.RateLimitRemain >= 0 {
+			fields = append(fields, observability.Any("rate_limit_remaining", snapshot.RateLimitRemain))
+		} else {
+			fields = append(fields, observability.String("rate_limit_remaining", "unknown"))
+		}
 	}
 
 	s.logger.Info("revalidation sweep complete", fields...)

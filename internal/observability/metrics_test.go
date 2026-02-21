@@ -15,6 +15,7 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	metrics.IncUpstreamRequest()
 	metrics.IncUpstreamRequest()
 	metrics.IncUpstreamError()
+	metrics.ObserveRateLimitRemaining(1234)
 
 	snapshot := metrics.Snapshot()
 	if snapshot.CacheHits != 1 {
@@ -31,6 +32,9 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	}
 	if snapshot.UpstreamErrors != 1 {
 		t.Fatalf("expected upstream errors to be 1, got %d", snapshot.UpstreamErrors)
+	}
+	if snapshot.RateLimitRemain != 1234 {
+		t.Fatalf("expected rate-limit remaining to be 1234, got %d", snapshot.RateLimitRemain)
 	}
 }
 
@@ -54,6 +58,7 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 				metrics.IncRevalidateRun()
 				metrics.IncUpstreamRequest()
 				metrics.IncUpstreamError()
+				metrics.ObserveRateLimitRemaining(5000)
 			}
 		}()
 	}
@@ -76,5 +81,22 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 	}
 	if snapshot.UpstreamErrors != want {
 		t.Fatalf("expected upstream errors to be %d, got %d", want, snapshot.UpstreamErrors)
+	}
+	if snapshot.RateLimitRemain != 5000 {
+		t.Fatalf("expected rate-limit remaining to be 5000, got %d", snapshot.RateLimitRemain)
+	}
+}
+
+func TestMetricsRateLimitRemainingDefaultsToUnknownAndClampsNegative(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics()
+	if got := metrics.Snapshot().RateLimitRemain; got != -1 {
+		t.Fatalf("expected default rate-limit remaining -1, got %d", got)
+	}
+
+	metrics.ObserveRateLimitRemaining(-5)
+	if got := metrics.Snapshot().RateLimitRemain; got != 0 {
+		t.Fatalf("expected clamped rate-limit remaining 0, got %d", got)
 	}
 }
