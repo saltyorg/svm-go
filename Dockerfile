@@ -19,7 +19,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -ldflags="-w -s" -o svm main.go
+RUN go build -ldflags="-w -s" -o svm ./cmd/svm/main.go
 
 # Runtime stage
 FROM alpine:latest
