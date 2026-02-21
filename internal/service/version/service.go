@@ -602,12 +602,17 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 	now := s.now().UTC()
 	token := s.tokenProvider.NextToken()
 
+	s.incUpstreamRequest()
 	resp, err := s.upstream.Get(context.Background(), urlToFetch, token, record.ETag)
 	if err != nil {
+		s.incUpstreamError()
 		s.logger.Warn("background refresh failed", observability.String("error", err.Error()))
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		s.incUpstreamError()
+	}
 
 	if cooldownObserver, ok := s.tokenProvider.(upstreamgithub.RateLimitedTokenObserver); ok {
 		s.upstream.ObserveRateLimit(token, resp, cooldownObserver)

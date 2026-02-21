@@ -3,6 +3,7 @@ package version
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"svm/internal/cache"
@@ -41,6 +42,9 @@ type RevalidateScheduler struct {
 	now        func() time.Time
 	interval   time.Duration
 	scaler     refreshWorkerScaler
+
+	lastUpstreamRequests atomic.Uint64
+	lastUpstreamErrors   atomic.Uint64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -136,7 +140,7 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 	s.incRevalidateRun()
 	if s.activeKeys == nil || s.cacheStore == nil || s.queue == nil {
-		return RevalidateSweepResult{}
+		return s.finishSweep(RevalidateSweepResult{})
 	}
 
 	now := s.now().UTC()
@@ -147,7 +151,7 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 			"failed to list active keys for revalidation",
 			observability.String("error", err.Error()),
 		)
-		return RevalidateSweepResult{}
+		return s.finishSweep(RevalidateSweepResult{})
 	}
 
 	dueKeys := make([]string, 0, len(keys))
@@ -193,7 +197,7 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 		}
 	}
 
-	return result
+	return s.finishSweep(result)
 }
 
 // Close stops the scheduler worker.
@@ -225,6 +229,15 @@ func (s *RevalidateScheduler) SetMetrics(metrics *observability.Metrics) {
 		return
 	}
 	s.metrics = metrics
+	if metrics == nil {
+		s.lastUpstreamRequests.Store(0)
+		s.lastUpstreamErrors.Store(0)
+		return
+	}
+
+	snapshot := metrics.Snapshot()
+	s.lastUpstreamRequests.Store(snapshot.UpstreamRequests)
+	s.lastUpstreamErrors.Store(snapshot.UpstreamErrors)
 }
 
 // SetWorkerScaler attaches an optional worker scaler used to adjust refresh-worker count per sweep.
@@ -270,4 +283,38 @@ func partitionRefreshKeys(keys []string, perWorker int) [][]string {
 	}
 
 	return partitions
+}
+
+func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) RevalidateSweepResult {
+	if s == nil || s.logger == nil {
+		return result
+	}
+
+	fields := []observability.Field{
+		observability.Int("candidate_keys", result.CandidateKeys),
+		observability.Int("due_keys", result.DueKeys),
+		observability.Int("worker_count", result.WorkerCount),
+		observability.Int("enqueued", result.Enqueued),
+		observability.Int("dropped", result.Dropped),
+	}
+	if s.metrics != nil {
+		snapshot := s.metrics.Snapshot()
+		upstreamRequestsDelta := counterDelta(s.lastUpstreamRequests.Swap(snapshot.UpstreamRequests), snapshot.UpstreamRequests)
+		upstreamErrorsDelta := counterDelta(s.lastUpstreamErrors.Swap(snapshot.UpstreamErrors), snapshot.UpstreamErrors)
+		fields = append(fields,
+			observability.Any("cycle_upstream_requests", upstreamRequestsDelta),
+			observability.Any("cycle_upstream_errors", upstreamErrorsDelta),
+		)
+	}
+
+	s.logger.Info("revalidation sweep complete", fields...)
+	return result
+}
+
+func counterDelta(previous, current uint64) uint64 {
+	if current < previous {
+		return current
+	}
+
+	return current - previous
 }
