@@ -36,8 +36,8 @@ COPY --from=builder /app/svm .
 # Expose the port
 EXPOSE 8000
 
-# Set environment variable for port (matching the original)
+# Set environment variable for port
 ENV PORT=8000
 
-# Start the application (matching the original uvicorn command structure)
+# Start the application
 CMD ["./svm"]
