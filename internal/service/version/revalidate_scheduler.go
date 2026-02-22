@@ -129,10 +129,8 @@ func newRevalidateScheduler(
 		return scheduler
 	}
 
-	ticker := time.NewTicker(scheduler.interval)
 	go func() {
-		defer ticker.Stop()
-		scheduler.run(ctx, ticker.C)
+		scheduler.runWithFixedDelay(ctx)
 	}()
 
 	return scheduler
@@ -248,6 +246,23 @@ func (s *RevalidateScheduler) run(ctx context.Context, tickCh <-chan time.Time) 
 			return
 		case <-tickCh:
 			_ = s.Sweep(ctx)
+		}
+	}
+}
+
+func (s *RevalidateScheduler) runWithFixedDelay(ctx context.Context) {
+	defer close(s.done)
+
+	timer := time.NewTimer(s.interval)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			_ = s.Sweep(ctx)
+			timer.Reset(s.interval)
 		}
 	}
 }
