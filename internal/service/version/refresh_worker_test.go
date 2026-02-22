@@ -24,10 +24,10 @@ func TestRefreshWorkersProcessQueuedKeys(t *testing.T) {
 	workers.SetMetrics(metrics)
 	defer workers.Close()
 
-	if ok := queue.Enqueue("key-1"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-1"}); !ok {
 		t.Fatal("expected first key enqueue to succeed")
 	}
-	if ok := queue.Enqueue("key-2"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-2"}); !ok {
 		t.Fatal("expected second key enqueue to succeed")
 	}
 
@@ -37,6 +37,34 @@ func TestRefreshWorkersProcessQueuedKeys(t *testing.T) {
 	}
 	if got := metrics.Snapshot().RefreshProcessed; got != 2 {
 		t.Fatalf("expected 2 processed refresh jobs, got %d", got)
+	}
+}
+
+func TestRefreshWorkersMarkTrackedJobCompletion(t *testing.T) {
+	t.Parallel()
+
+	queue := NewRefreshQueue(4)
+	defer queue.Close()
+
+	refresher := newFakeRefreshByKeyRequester()
+	workers := newRefreshWorkers(queue, refresher, 1, 1000, nil, time.Now, true)
+	tracker := NewRefreshJobTracker()
+	workers.SetJobTracker(tracker)
+	defer workers.Close()
+
+	const jobID uint64 = 42
+	tracker.Start(jobID, 2)
+	if ok := queue.Enqueue(RefreshJob{ID: jobID, Key: "key-1"}); !ok {
+		t.Fatal("expected first enqueue to succeed")
+	}
+	if ok := queue.Enqueue(RefreshJob{ID: jobID, Key: "key-2"}); !ok {
+		t.Fatal("expected second enqueue to succeed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if ok := tracker.Wait(ctx, jobID); !ok {
+		t.Fatal("expected tracked job completion to be observed")
 	}
 }
 
@@ -50,13 +78,13 @@ func TestRefreshWorkersSetWorkerCountScalesUp(t *testing.T) {
 	workers := newRefreshWorkers(queue, refresher, 1, 1000, nil, time.Now, true)
 	defer workers.Close()
 
-	if ok := queue.Enqueue("key-1"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-1"}); !ok {
 		t.Fatal("expected enqueue for key-1 to succeed")
 	}
-	if ok := queue.Enqueue("key-2"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-2"}); !ok {
 		t.Fatal("expected enqueue for key-2 to succeed")
 	}
-	if ok := queue.Enqueue("key-3"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-3"}); !ok {
 		t.Fatal("expected enqueue for key-3 to succeed")
 	}
 
@@ -102,13 +130,13 @@ func TestRefreshWorkersWithServiceDedupesInFlightKey(t *testing.T) {
 
 	queue := NewRefreshQueue(4)
 	defer queue.Close()
-	workers := newRefreshWorkers(queue, service, 1, 1000, nil, time.Now, true)
+	workers := newRefreshWorkers(queue, service, 2, 1000, nil, time.Now, true)
 	defer workers.Close()
 
-	if ok := queue.Enqueue(cacheKey); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: cacheKey}); !ok {
 		t.Fatal("expected first key enqueue to succeed")
 	}
-	if ok := queue.Enqueue(cacheKey); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: cacheKey}); !ok {
 		t.Fatal("expected duplicate key enqueue to succeed")
 	}
 
@@ -164,7 +192,7 @@ func TestRefreshWorkersWithServiceUpdatesCacheMetadataOn304(t *testing.T) {
 	defer queue.Close()
 	workers := newRefreshWorkers(queue, service, 1, 1000, nil, time.Now, true)
 
-	if ok := queue.Enqueue(cacheKey); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: cacheKey}); !ok {
 		t.Fatal("expected enqueue to succeed")
 	}
 
@@ -239,7 +267,7 @@ func TestRefreshWorkersWithServiceReplacesCacheRecordOn200(t *testing.T) {
 	defer queue.Close()
 	workers := newRefreshWorkers(queue, service, 1, 1000, nil, time.Now, true)
 
-	if ok := queue.Enqueue(cacheKey); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: cacheKey}); !ok {
 		t.Fatal("expected enqueue to succeed")
 	}
 
@@ -294,13 +322,13 @@ func TestRefreshWorkersEnforcePerWorkerRateLimit(t *testing.T) {
 	workers := newRefreshWorkers(queue, refresher, 1, 2, nil, time.Now, true)
 	defer workers.Close()
 
-	if ok := queue.Enqueue("key-1"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-1"}); !ok {
 		t.Fatal("expected first enqueue to succeed")
 	}
-	if ok := queue.Enqueue("key-2"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-2"}); !ok {
 		t.Fatal("expected second enqueue to succeed")
 	}
-	if ok := queue.Enqueue("key-3"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-3"}); !ok {
 		t.Fatal("expected third enqueue to succeed")
 	}
 
@@ -329,13 +357,13 @@ func TestRefreshWorkersDefaultToOneRequestPerSecond(t *testing.T) {
 	workers := newRefreshWorkers(queue, refresher, 1, 0, nil, time.Now, true)
 	defer workers.Close()
 
-	if ok := queue.Enqueue("key-1"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-1"}); !ok {
 		t.Fatal("expected first enqueue to succeed")
 	}
-	if ok := queue.Enqueue("key-2"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-2"}); !ok {
 		t.Fatal("expected second enqueue to succeed")
 	}
-	if ok := queue.Enqueue("key-3"); !ok {
+	if ok := queue.Enqueue(RefreshJob{Key: "key-3"}); !ok {
 		t.Fatal("expected third enqueue to succeed")
 	}
 

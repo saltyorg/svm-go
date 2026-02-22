@@ -288,8 +288,7 @@ func TestRevalidateSchedulerSweepWaitsForProcessedJobsUntilContextDone(t *testin
 		false,
 		nil,
 	)
-	metrics := observability.NewMetrics()
-	scheduler.SetMetrics(metrics)
+	scheduler.SetJobTracker(NewRefreshJobTracker())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -307,8 +306,43 @@ func TestRevalidateSchedulerSweepWaitsForProcessedJobsUntilContextDone(t *testin
 	if elapsed > 200*time.Millisecond {
 		t.Fatalf("expected sweep timeout-bound wait, took %s", elapsed)
 	}
-	if got := metrics.Snapshot().RefreshProcessed; got != 0 {
-		t.Fatalf("expected 0 processed jobs without workers, got %d", got)
+}
+
+func TestRevalidateSchedulerSweepCleansUpTrackedJobAfterLogging(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 22, 0, 20, 0, 0, time.UTC)
+	source := &fakeActiveKeySource{keys: []string{"key-a", "key-b"}}
+	store := &fakeSchedulerCacheStore{
+		records: map[string]cache.Record{
+			"key-a": {LastCheckedAt: now.Add(-time.Minute)},
+			"key-b": {LastCheckedAt: now.Add(-time.Minute)},
+		},
+	}
+
+	queue := &alwaysDropRefreshEnqueuer{}
+	tracker := NewRefreshJobTracker()
+	scheduler := newRevalidateScheduler(
+		source,
+		store,
+		queue,
+		cache.DefaultPolicy(),
+		nil,
+		func() time.Time { return now },
+		false,
+		nil,
+	)
+	scheduler.SetJobTracker(tracker)
+
+	result := scheduler.Sweep(context.Background())
+	if result.SweepJobID == 0 {
+		t.Fatal("expected non-zero sweep job id")
+	}
+	tracker.mu.Lock()
+	_, exists := tracker.jobs[result.SweepJobID]
+	tracker.mu.Unlock()
+	if exists {
+		t.Fatalf("expected sweep job %d to be cleaned up", result.SweepJobID)
 	}
 }
 
@@ -447,9 +481,15 @@ type fakeRefreshEnqueuer struct {
 	keys []string
 }
 
-func (f *fakeRefreshEnqueuer) Enqueue(key string) bool {
-	f.keys = append(f.keys, key)
+func (f *fakeRefreshEnqueuer) Enqueue(job RefreshJob) bool {
+	f.keys = append(f.keys, job.Key)
 	return true
+}
+
+type alwaysDropRefreshEnqueuer struct{}
+
+func (a *alwaysDropRefreshEnqueuer) Enqueue(RefreshJob) bool {
+	return false
 }
 
 type fakeRefreshWorkerScaler struct {

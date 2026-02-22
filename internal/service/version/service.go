@@ -442,13 +442,13 @@ func (s *Service) RefreshInBackground(request Request) bool {
 	})
 }
 
-// RefreshByKey schedules an async conditional refresh deduped by cache key.
+// RefreshByKey runs a conditional refresh deduped by cache key.
 func (s *Service) RefreshByKey(cacheKey string) bool {
 	if s == nil || cacheKey == "" {
 		return false
 	}
 
-	return s.refreshGroup.Do(cacheKey, func() {
+	return s.refreshGroup.DoSync(cacheKey, func() {
 		s.refreshOnceByKey(cacheKey)
 	})
 }
@@ -762,19 +762,38 @@ func (g *backgroundRefreshGroup) Do(key string, fn func()) bool {
 		return false
 	}
 
-	g.mu.Lock()
-	if _, exists := g.inFlight[key]; exists {
-		g.mu.Unlock()
+	if !g.start(key) {
 		return false
 	}
-	g.inFlight[key] = struct{}{}
-	g.mu.Unlock()
 
 	go func() {
 		defer g.done(key)
 		fn()
 	}()
 
+	return true
+}
+
+func (g *backgroundRefreshGroup) DoSync(key string, fn func()) bool {
+	if g == nil || key == "" || fn == nil {
+		return false
+	}
+
+	if !g.start(key) {
+		return false
+	}
+	defer g.done(key)
+	fn()
+	return true
+}
+
+func (g *backgroundRefreshGroup) start(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, exists := g.inFlight[key]; exists {
+		return false
+	}
+	g.inFlight[key] = struct{}{}
 	return true
 }
 

@@ -15,7 +15,7 @@ type activeKeySource interface {
 }
 
 type refreshEnqueuer interface {
-	Enqueue(key string) bool
+	Enqueue(job RefreshJob) bool
 }
 
 type refreshWorkerScaler interface {
@@ -30,6 +30,7 @@ type RevalidateSweepResult struct {
 	WorkerCount   int
 	Enqueued      int
 	Dropped       int
+	SweepJobID    uint64
 }
 
 // RevalidateScheduler periodically selects due active keys and enqueues refresh work.
@@ -43,6 +44,7 @@ type RevalidateScheduler struct {
 	now        func() time.Time
 	interval   time.Duration
 	scaler     refreshWorkerScaler
+	jobTracker *RefreshJobTracker
 
 	lastUpstreamRequests atomic.Uint64
 	lastUpstreamErrors   atomic.Uint64
@@ -50,12 +52,11 @@ type RevalidateScheduler struct {
 	lastRefreshNotMod    atomic.Uint64
 	lastRefreshSkipped   atomic.Uint64
 	lastRefreshFailed    atomic.Uint64
+	nextSweepJobID       atomic.Uint64
 
 	cancel context.CancelFunc
 	done   chan struct{}
 }
-
-const sweepCompletionPollInterval = 10 * time.Millisecond
 
 // NewRevalidateScheduler creates and starts a scheduler worker.
 func NewRevalidateScheduler(
@@ -162,11 +163,6 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 
 	dueKeys := make([]string, 0, len(keys))
-	metrics := s.metrics
-	startProcessed := uint64(0)
-	if metrics != nil {
-		startProcessed = metrics.Snapshot().RefreshProcessed
-	}
 	result := RevalidateSweepResult{
 		CandidateKeys: len(keys),
 	}
@@ -195,6 +191,10 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 
 	result.DueKeys = len(dueKeys)
+	if s.jobTracker != nil && len(dueKeys) > 0 {
+		result.SweepJobID = s.nextSweepJobID.Add(1)
+		s.jobTracker.Start(result.SweepJobID, len(dueKeys))
+	}
 	result.WorkerCount = workerCountForDueEndpoints(len(dueKeys), s.policy.RevalidateEndpointsPerWorker)
 	if s.scaler != nil {
 		s.scaler.SetWorkerCount(result.WorkerCount)
@@ -202,18 +202,31 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 
 	for _, batch := range partitionRefreshKeys(dueKeys, s.policy.RevalidateEndpointsPerWorker) {
 		for _, key := range batch {
-			if s.queue.Enqueue(key) {
+			job := RefreshJob{
+				ID:  result.SweepJobID,
+				Key: key,
+			}
+			if s.queue.Enqueue(job) {
 				result.Enqueued++
 			} else {
 				result.Dropped++
+				if s.jobTracker != nil && result.SweepJobID != 0 {
+					s.jobTracker.Complete(result.SweepJobID)
+				}
 			}
 		}
 	}
-	if metrics != nil && result.Enqueued > 0 {
-		s.waitForEnqueuedRefreshes(ctx, metrics, startProcessed, uint64(result.Enqueued))
+
+	if s.jobTracker != nil && result.SweepJobID != 0 {
+		_ = s.jobTracker.Wait(ctx, result.SweepJobID)
 	}
 
-	return s.finishSweep(result)
+	out := s.finishSweep(result)
+	if s.jobTracker != nil && result.SweepJobID != 0 {
+		s.jobTracker.Cleanup(result.SweepJobID)
+	}
+
+	return out
 }
 
 // Close stops the scheduler worker.
@@ -272,6 +285,14 @@ func (s *RevalidateScheduler) SetWorkerScaler(scaler refreshWorkerScaler) {
 	s.scaler = scaler
 }
 
+// SetJobTracker attaches optional per-sweep refresh completion tracking.
+func (s *RevalidateScheduler) SetJobTracker(tracker *RefreshJobTracker) {
+	if s == nil {
+		return
+	}
+	s.jobTracker = tracker
+}
+
 func (s *RevalidateScheduler) incRevalidateRun() {
 	if s == nil || s.metrics == nil {
 		return
@@ -309,35 +330,6 @@ func partitionRefreshKeys(keys []string, perWorker int) [][]string {
 	return partitions
 }
 
-func (s *RevalidateScheduler) waitForEnqueuedRefreshes(
-	ctx context.Context,
-	metrics *observability.Metrics,
-	startProcessed, expectedProcessed uint64,
-) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if metrics == nil || expectedProcessed == 0 {
-		return
-	}
-
-	target := startProcessed + expectedProcessed
-	ticker := time.NewTicker(sweepCompletionPollInterval)
-	defer ticker.Stop()
-
-	for {
-		if metrics.Snapshot().RefreshProcessed >= target {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) RevalidateSweepResult {
 	if s == nil || s.logger == nil {
 		return result
@@ -350,6 +342,9 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 		observability.Int("worker_count", result.WorkerCount),
 		observability.Int("enqueued", result.Enqueued),
 		observability.Int("dropped", result.Dropped),
+	}
+	if result.SweepJobID != 0 {
+		fields = append(fields, observability.Any("sweep_job_id", result.SweepJobID))
 	}
 	if s.metrics != nil {
 		snapshot := s.metrics.Snapshot()

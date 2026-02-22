@@ -7,11 +7,17 @@ import (
 
 const defaultRefreshQueueSize = 256
 
+// RefreshJob is a queued refresh request with scheduler-assigned job ID.
+type RefreshJob struct {
+	ID  uint64
+	Key string
+}
+
 // RefreshQueue is a bounded queue for async refresh keys.
 type RefreshQueue struct {
 	mu     sync.RWMutex
 	closed bool
-	keys   chan string
+	keys   chan RefreshJob
 }
 
 // NewRefreshQueue creates a bounded refresh queue.
@@ -21,13 +27,13 @@ func NewRefreshQueue(size int) *RefreshQueue {
 	}
 
 	return &RefreshQueue{
-		keys: make(chan string, size),
+		keys: make(chan RefreshJob, size),
 	}
 }
 
 // Enqueue attempts to queue a key without blocking.
-func (q *RefreshQueue) Enqueue(key string) bool {
-	if q == nil || key == "" {
+func (q *RefreshQueue) Enqueue(job RefreshJob) bool {
+	if q == nil || job.Key == "" {
 		return false
 	}
 
@@ -38,7 +44,7 @@ func (q *RefreshQueue) Enqueue(key string) bool {
 	}
 
 	select {
-	case q.keys <- key:
+	case q.keys <- job:
 		return true
 	default:
 		return false
@@ -46,9 +52,9 @@ func (q *RefreshQueue) Enqueue(key string) bool {
 }
 
 // Dequeue waits for the next key until context cancellation or queue close.
-func (q *RefreshQueue) Dequeue(ctx context.Context) (string, bool) {
+func (q *RefreshQueue) Dequeue(ctx context.Context) (RefreshJob, bool) {
 	if q == nil {
-		return "", false
+		return RefreshJob{}, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -56,12 +62,12 @@ func (q *RefreshQueue) Dequeue(ctx context.Context) (string, bool) {
 
 	select {
 	case <-ctx.Done():
-		return "", false
-	case key, ok := <-q.keys:
+		return RefreshJob{}, false
+	case job, ok := <-q.keys:
 		if !ok {
-			return "", false
+			return RefreshJob{}, false
 		}
-		return key, true
+		return job, true
 	}
 }
 

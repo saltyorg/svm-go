@@ -617,12 +617,12 @@ type fakeQueueRuntime struct {
 	closeCalls int
 }
 
-func (f *fakeQueueRuntime) Enqueue(string) bool {
+func (f *fakeQueueRuntime) Enqueue(versionservice.RefreshJob) bool {
 	return true
 }
 
-func (f *fakeQueueRuntime) Dequeue(context.Context) (string, bool) {
-	return "", false
+func (f *fakeQueueRuntime) Dequeue(context.Context) (versionservice.RefreshJob, bool) {
+	return versionservice.RefreshJob{}, false
 }
 
 func (f *fakeQueueRuntime) Close() {

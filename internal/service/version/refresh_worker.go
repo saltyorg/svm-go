@@ -14,7 +14,7 @@ import (
 const defaultRefreshWorkerCount = 1
 
 type refreshDequeuer interface {
-	Dequeue(ctx context.Context) (string, bool)
+	Dequeue(ctx context.Context) (RefreshJob, bool)
 }
 
 type refreshByKeyRequester interface {
@@ -31,6 +31,7 @@ type RefreshWorkers struct {
 	initialWorkerCount int
 	countUpdates       chan int
 	metrics            atomic.Pointer[observability.Metrics]
+	jobTracker         atomic.Pointer[RefreshJobTracker]
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -137,6 +138,14 @@ func (w *RefreshWorkers) SetMetrics(metrics *observability.Metrics) {
 	w.metrics.Store(metrics)
 }
 
+// SetJobTracker attaches optional per-job completion tracking.
+func (w *RefreshWorkers) SetJobTracker(tracker *RefreshJobTracker) {
+	if w == nil {
+		return
+	}
+	w.jobTracker.Store(tracker)
+}
+
 // Close stops all refresh workers.
 func (w *RefreshWorkers) Close() {
 	if w == nil || w.cancel == nil {
@@ -212,10 +221,11 @@ func (w *RefreshWorkers) runWorker(ctx context.Context) {
 	lastRunAt := time.Time{}
 
 	for {
-		key, ok := w.queue.Dequeue(ctx)
+		job, ok := w.queue.Dequeue(ctx)
 		if !ok {
 			return
 		}
+		key := job.Key
 		if key == "" {
 			continue
 		}
@@ -233,6 +243,9 @@ func (w *RefreshWorkers) runWorker(ctx context.Context) {
 		_ = w.refresher.RefreshByKey(key)
 		if metrics := w.metrics.Load(); metrics != nil {
 			metrics.IncRefreshProcessed()
+		}
+		if tracker := w.jobTracker.Load(); tracker != nil && job.ID != 0 {
+			tracker.Complete(job.ID)
 		}
 		lastRunAt = w.now()
 	}

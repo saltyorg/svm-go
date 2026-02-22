@@ -58,8 +58,8 @@ type writeBehindRuntime interface {
 }
 
 type refreshQueueRuntime interface {
-	Enqueue(key string) bool
-	Dequeue(ctx context.Context) (string, bool)
+	Enqueue(job versionservice.RefreshJob) bool
+	Dequeue(ctx context.Context) (versionservice.RefreshJob, bool)
 	Close()
 }
 
@@ -249,6 +249,7 @@ func (app *App) startRevalidationRuntime() {
 	}
 
 	app.refreshQueue = versionservice.NewRefreshQueue(app.cachePolicy.WriteBehindQueueSize)
+	jobTracker := versionservice.NewRefreshJobTracker()
 	workers := versionservice.NewRefreshWorkers(
 		app.refreshQueue,
 		refresher,
@@ -257,6 +258,7 @@ func (app *App) startRevalidationRuntime() {
 		app.getLogger(),
 	)
 	workers.SetMetrics(app.metrics)
+	workers.SetJobTracker(jobTracker)
 	app.refreshWorkers = workers
 
 	scheduler := versionservice.NewRevalidateScheduler(
@@ -268,6 +270,7 @@ func (app *App) startRevalidationRuntime() {
 	)
 	scheduler.SetWorkerScaler(workers)
 	scheduler.SetMetrics(app.metrics)
+	scheduler.SetJobTracker(jobTracker)
 	app.revalidateScheduler = scheduler
 }
 
