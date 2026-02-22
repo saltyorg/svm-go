@@ -18,6 +18,10 @@ func TestMetricsHandlerReturnsPrometheusText(t *testing.T) {
 	metrics.IncRevalidateRun()
 	metrics.IncUpstreamRequest()
 	metrics.IncUpstreamError()
+	metrics.IncRefreshUpdated()
+	metrics.IncRefreshNotMod()
+	metrics.IncRefreshSkipped()
+	metrics.IncRefreshFailed()
 
 	handler := NewMetricsHandler(metrics)
 
@@ -37,6 +41,10 @@ func TestMetricsHandlerReturnsPrometheusText(t *testing.T) {
 	assertContainsLine(t, body, "svm_revalidate_runs_total 1")
 	assertContainsLine(t, body, "svm_upstream_requests_total 1")
 	assertContainsLine(t, body, "svm_upstream_errors_total 1")
+	assertContainsLine(t, body, "svm_refresh_updated_total 1")
+	assertContainsLine(t, body, "svm_refresh_not_modified_total 1")
+	assertContainsLine(t, body, "svm_refresh_skipped_total 1")
+	assertContainsLine(t, body, "svm_refresh_failed_total 1")
 }
 
 func assertContainsLine(t *testing.T, body, expected string) {

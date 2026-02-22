@@ -507,6 +507,34 @@ func (s *Service) incUpstreamError() {
 	s.metrics.IncUpstreamError()
 }
 
+func (s *Service) incRefreshUpdated() {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.IncRefreshUpdated()
+}
+
+func (s *Service) incRefreshNotMod() {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.IncRefreshNotMod()
+}
+
+func (s *Service) incRefreshSkipped() {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.IncRefreshSkipped()
+}
+
+func (s *Service) incRefreshFailed() {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	s.metrics.IncRefreshFailed()
+}
+
 func (s *Service) observeRateLimitRemaining(token string, remaining int) {
 	if s == nil {
 		return
@@ -594,9 +622,11 @@ func (s *Service) refreshOnce(urlToFetch, cacheKey string) {
 	record, cacheHit, err := s.getFromCache(context.Background(), cacheKey)
 	if err != nil {
 		s.logger.Error("cache error", observability.String("error", err.Error()))
+		s.incRefreshFailed()
 		return
 	}
 	if !cacheHit {
+		s.incRefreshSkipped()
 		return
 	}
 
@@ -607,12 +637,15 @@ func (s *Service) refreshOnceByKey(cacheKey string) {
 	record, cacheHit, err := s.getFromCache(context.Background(), cacheKey)
 	if err != nil {
 		s.logger.Error("cache error", observability.String("error", err.Error()))
+		s.incRefreshFailed()
 		return
 	}
 	if !cacheHit {
+		s.incRefreshSkipped()
 		return
 	}
 	if strings.TrimSpace(record.URL) == "" {
+		s.incRefreshSkipped()
 		return
 	}
 
@@ -621,6 +654,7 @@ func (s *Service) refreshOnceByKey(cacheKey string) {
 
 func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.Record) {
 	if isNegativeCacheableStatus(record.SourceStatus) {
+		s.incRefreshSkipped()
 		return
 	}
 
@@ -631,6 +665,7 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 	resp, err := s.upstream.Get(context.Background(), urlToFetch, token, record.ETag)
 	if err != nil {
 		s.incUpstreamError()
+		s.incRefreshFailed()
 		s.logger.Warn("background refresh failed", observability.String("error", err.Error()))
 		return
 	}
@@ -652,9 +687,11 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 		record.ExpiresAt = hardExpiresAt(now, s.policy.HardTTL)
 		record.URL = urlToFetch
 		_, _ = s.setToCache(cacheKey, record)
+		s.incRefreshNotMod()
 	case http.StatusOK:
 		payload, readErr := io.ReadAll(resp.Body)
 		if readErr != nil || !json.Valid(payload) {
+			s.incRefreshFailed()
 			return
 		}
 
@@ -669,6 +706,9 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 			SourceStatus:  resp.StatusCode,
 		}
 		_, _ = s.setToCache(cacheKey, updated)
+		s.incRefreshUpdated()
+	default:
+		s.incRefreshFailed()
 	}
 }
 

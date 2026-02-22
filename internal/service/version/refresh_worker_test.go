@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"svm/internal/cache"
+	"svm/internal/observability"
 	upstreamgithub "svm/internal/upstream/github"
 )
 
@@ -150,6 +151,8 @@ func TestRefreshWorkersWithServiceUpdatesCacheMetadataOn304(t *testing.T) {
 		nil,
 		policy,
 	)
+	metrics := observability.NewMetrics()
+	service.SetMetrics(metrics)
 	service.now = func() time.Time { return now }
 
 	queue := NewRefreshQueue(2)
@@ -178,6 +181,20 @@ func TestRefreshWorkersWithServiceUpdatesCacheMetadataOn304(t *testing.T) {
 	}
 	if !lastSet.ExpiresAt.Equal(now.Add(policy.HardTTL)) {
 		t.Fatalf("expected ExpiresAt %v, got %v", now.Add(policy.HardTTL), lastSet.ExpiresAt)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.RefreshNotMod != 1 {
+		t.Fatalf("expected 1 not-modified refresh, got %d", snapshot.RefreshNotMod)
+	}
+	if snapshot.RefreshUpdated != 0 {
+		t.Fatalf("expected 0 updated refreshes, got %d", snapshot.RefreshUpdated)
+	}
+	if snapshot.RefreshFailed != 0 {
+		t.Fatalf("expected 0 failed refreshes, got %d", snapshot.RefreshFailed)
+	}
+	if snapshot.RefreshSkipped != 0 {
+		t.Fatalf("expected 0 skipped refreshes, got %d", snapshot.RefreshSkipped)
 	}
 }
 
@@ -209,6 +226,8 @@ func TestRefreshWorkersWithServiceReplacesCacheRecordOn200(t *testing.T) {
 		nil,
 		policy,
 	)
+	metrics := observability.NewMetrics()
+	service.SetMetrics(metrics)
 	service.now = func() time.Time { return now }
 
 	queue := NewRefreshQueue(2)
@@ -243,6 +262,20 @@ func TestRefreshWorkersWithServiceReplacesCacheRecordOn200(t *testing.T) {
 	}
 	if !lastSet.ExpiresAt.Equal(now.Add(policy.HardTTL)) {
 		t.Fatalf("expected ExpiresAt %v, got %v", now.Add(policy.HardTTL), lastSet.ExpiresAt)
+	}
+
+	snapshot := metrics.Snapshot()
+	if snapshot.RefreshUpdated != 1 {
+		t.Fatalf("expected 1 updated refresh, got %d", snapshot.RefreshUpdated)
+	}
+	if snapshot.RefreshNotMod != 0 {
+		t.Fatalf("expected 0 not-modified refreshes, got %d", snapshot.RefreshNotMod)
+	}
+	if snapshot.RefreshFailed != 0 {
+		t.Fatalf("expected 0 failed refreshes, got %d", snapshot.RefreshFailed)
+	}
+	if snapshot.RefreshSkipped != 0 {
+		t.Fatalf("expected 0 skipped refreshes, got %d", snapshot.RefreshSkipped)
 	}
 }
 

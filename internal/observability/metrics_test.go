@@ -15,6 +15,10 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	metrics.IncUpstreamRequest()
 	metrics.IncUpstreamRequest()
 	metrics.IncUpstreamError()
+	metrics.IncRefreshUpdated()
+	metrics.IncRefreshNotMod()
+	metrics.IncRefreshSkipped()
+	metrics.IncRefreshFailed()
 	metrics.ObserveRateLimitRemaining(1234)
 
 	snapshot := metrics.Snapshot()
@@ -32,6 +36,18 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	}
 	if snapshot.UpstreamErrors != 1 {
 		t.Fatalf("expected upstream errors to be 1, got %d", snapshot.UpstreamErrors)
+	}
+	if snapshot.RefreshUpdated != 1 {
+		t.Fatalf("expected refresh updated to be 1, got %d", snapshot.RefreshUpdated)
+	}
+	if snapshot.RefreshNotMod != 1 {
+		t.Fatalf("expected refresh not-modified to be 1, got %d", snapshot.RefreshNotMod)
+	}
+	if snapshot.RefreshSkipped != 1 {
+		t.Fatalf("expected refresh skipped to be 1, got %d", snapshot.RefreshSkipped)
+	}
+	if snapshot.RefreshFailed != 1 {
+		t.Fatalf("expected refresh failed to be 1, got %d", snapshot.RefreshFailed)
 	}
 	if snapshot.RateLimitRemain != 1234 {
 		t.Fatalf("expected rate-limit remaining to be 1234, got %d", snapshot.RateLimitRemain)
@@ -58,6 +74,10 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 				metrics.IncRevalidateRun()
 				metrics.IncUpstreamRequest()
 				metrics.IncUpstreamError()
+				metrics.IncRefreshUpdated()
+				metrics.IncRefreshNotMod()
+				metrics.IncRefreshSkipped()
+				metrics.IncRefreshFailed()
 				metrics.ObserveRateLimitRemaining(5000)
 			}
 		}()
@@ -81,6 +101,18 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 	}
 	if snapshot.UpstreamErrors != want {
 		t.Fatalf("expected upstream errors to be %d, got %d", want, snapshot.UpstreamErrors)
+	}
+	if snapshot.RefreshUpdated != want {
+		t.Fatalf("expected refresh updated to be %d, got %d", want, snapshot.RefreshUpdated)
+	}
+	if snapshot.RefreshNotMod != want {
+		t.Fatalf("expected refresh not-modified to be %d, got %d", want, snapshot.RefreshNotMod)
+	}
+	if snapshot.RefreshSkipped != want {
+		t.Fatalf("expected refresh skipped to be %d, got %d", want, snapshot.RefreshSkipped)
+	}
+	if snapshot.RefreshFailed != want {
+		t.Fatalf("expected refresh failed to be %d, got %d", want, snapshot.RefreshFailed)
 	}
 	if snapshot.RateLimitRemain != 5000 {
 		t.Fatalf("expected rate-limit remaining to be 5000, got %d", snapshot.RateLimitRemain)

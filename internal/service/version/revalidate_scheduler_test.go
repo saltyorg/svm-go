@@ -1,7 +1,9 @@
 package version
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +53,9 @@ func TestRevalidateSchedulerSweepFiltersDueKeysAndUsesLookback(t *testing.T) {
 	}
 	if result.DueKeys != 1 {
 		t.Fatalf("expected 1 due key, got %d", result.DueKeys)
+	}
+	if result.NotStaleKeys != 1 {
+		t.Fatalf("expected 1 not-stale key, got %d", result.NotStaleKeys)
 	}
 	if result.WorkerCount != 1 {
 		t.Fatalf("expected worker count 1, got %d", result.WorkerCount)
@@ -255,6 +260,50 @@ func TestRevalidateSchedulerSweepIncrementsRunMetric(t *testing.T) {
 
 	if got := metrics.Snapshot().RevalidateRuns; got != 1 {
 		t.Fatalf("expected 1 revalidation run, got %d", got)
+	}
+}
+
+func TestRevalidateSchedulerFinishSweepLogsRefreshDeltas(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 21, 23, 47, 0, 0, time.UTC)
+	var logs bytes.Buffer
+	logger := observability.NewLogger(&logs)
+	metrics := observability.NewMetrics()
+
+	scheduler := newRevalidateScheduler(
+		&fakeActiveKeySource{},
+		&fakeSchedulerCacheStore{},
+		&fakeRefreshEnqueuer{},
+		cache.DefaultPolicy(),
+		logger,
+		func() time.Time { return now },
+		false,
+		nil,
+	)
+	scheduler.SetMetrics(metrics)
+
+	metrics.IncUpstreamRequest()
+	metrics.IncUpstreamError()
+	metrics.IncRefreshUpdated()
+	metrics.IncRefreshNotMod()
+	metrics.IncRefreshSkipped()
+	metrics.IncRefreshFailed()
+
+	scheduler.finishSweep(RevalidateSweepResult{})
+
+	output := logs.String()
+	if !strings.Contains(output, `"cycle_refresh_updated":1`) {
+		t.Fatalf("expected log to include refresh updated delta, got %q", output)
+	}
+	if !strings.Contains(output, `"cycle_refresh_not_modified":1`) {
+		t.Fatalf("expected log to include refresh not-modified delta, got %q", output)
+	}
+	if !strings.Contains(output, `"cycle_refresh_skipped":1`) {
+		t.Fatalf("expected log to include refresh skipped delta, got %q", output)
+	}
+	if !strings.Contains(output, `"cycle_refresh_failed":1`) {
+		t.Fatalf("expected log to include refresh failed delta, got %q", output)
 	}
 }
 

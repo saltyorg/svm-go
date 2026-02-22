@@ -26,6 +26,7 @@ type refreshWorkerScaler interface {
 type RevalidateSweepResult struct {
 	CandidateKeys int
 	DueKeys       int
+	NotStaleKeys  int
 	WorkerCount   int
 	Enqueued      int
 	Dropped       int
@@ -45,6 +46,10 @@ type RevalidateScheduler struct {
 
 	lastUpstreamRequests atomic.Uint64
 	lastUpstreamErrors   atomic.Uint64
+	lastRefreshUpdated   atomic.Uint64
+	lastRefreshNotMod    atomic.Uint64
+	lastRefreshSkipped   atomic.Uint64
+	lastRefreshFailed    atomic.Uint64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -155,6 +160,9 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 
 	dueKeys := make([]string, 0, len(keys))
+	result := RevalidateSweepResult{
+		CandidateKeys: len(keys),
+	}
 	for _, key := range keys {
 		if key == "" {
 			continue
@@ -173,16 +181,14 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 			continue
 		}
 		if !cache.IsRevalidationDue(record.LastCheckedAt, now, s.policy.RevalidateInterval) {
+			result.NotStaleKeys++
 			continue
 		}
 		dueKeys = append(dueKeys, key)
 	}
 
-	result := RevalidateSweepResult{
-		CandidateKeys: len(keys),
-		DueKeys:       len(dueKeys),
-		WorkerCount:   workerCountForDueEndpoints(len(dueKeys), s.policy.RevalidateEndpointsPerWorker),
-	}
+	result.DueKeys = len(dueKeys)
+	result.WorkerCount = workerCountForDueEndpoints(len(dueKeys), s.policy.RevalidateEndpointsPerWorker)
 	if s.scaler != nil {
 		s.scaler.SetWorkerCount(result.WorkerCount)
 	}
@@ -232,12 +238,20 @@ func (s *RevalidateScheduler) SetMetrics(metrics *observability.Metrics) {
 	if metrics == nil {
 		s.lastUpstreamRequests.Store(0)
 		s.lastUpstreamErrors.Store(0)
+		s.lastRefreshUpdated.Store(0)
+		s.lastRefreshNotMod.Store(0)
+		s.lastRefreshSkipped.Store(0)
+		s.lastRefreshFailed.Store(0)
 		return
 	}
 
 	snapshot := metrics.Snapshot()
 	s.lastUpstreamRequests.Store(snapshot.UpstreamRequests)
 	s.lastUpstreamErrors.Store(snapshot.UpstreamErrors)
+	s.lastRefreshUpdated.Store(snapshot.RefreshUpdated)
+	s.lastRefreshNotMod.Store(snapshot.RefreshNotMod)
+	s.lastRefreshSkipped.Store(snapshot.RefreshSkipped)
+	s.lastRefreshFailed.Store(snapshot.RefreshFailed)
 }
 
 // SetWorkerScaler attaches an optional worker scaler used to adjust refresh-worker count per sweep.
@@ -293,6 +307,7 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 	fields := []observability.Field{
 		observability.Int("candidate_keys", result.CandidateKeys),
 		observability.Int("due_keys", result.DueKeys),
+		observability.Int("not_stale_keys", result.NotStaleKeys),
 		observability.Int("worker_count", result.WorkerCount),
 		observability.Int("enqueued", result.Enqueued),
 		observability.Int("dropped", result.Dropped),
@@ -301,9 +316,17 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 		snapshot := s.metrics.Snapshot()
 		upstreamRequestsDelta := counterDelta(s.lastUpstreamRequests.Swap(snapshot.UpstreamRequests), snapshot.UpstreamRequests)
 		upstreamErrorsDelta := counterDelta(s.lastUpstreamErrors.Swap(snapshot.UpstreamErrors), snapshot.UpstreamErrors)
+		refreshUpdatedDelta := counterDelta(s.lastRefreshUpdated.Swap(snapshot.RefreshUpdated), snapshot.RefreshUpdated)
+		refreshNotModDelta := counterDelta(s.lastRefreshNotMod.Swap(snapshot.RefreshNotMod), snapshot.RefreshNotMod)
+		refreshSkippedDelta := counterDelta(s.lastRefreshSkipped.Swap(snapshot.RefreshSkipped), snapshot.RefreshSkipped)
+		refreshFailedDelta := counterDelta(s.lastRefreshFailed.Swap(snapshot.RefreshFailed), snapshot.RefreshFailed)
 		fields = append(fields,
 			observability.Any("cycle_upstream_requests", upstreamRequestsDelta),
 			observability.Any("cycle_upstream_errors", upstreamErrorsDelta),
+			observability.Any("cycle_refresh_updated", refreshUpdatedDelta),
+			observability.Any("cycle_refresh_not_modified", refreshNotModDelta),
+			observability.Any("cycle_refresh_skipped", refreshSkippedDelta),
+			observability.Any("cycle_refresh_failed", refreshFailedDelta),
 		)
 		if snapshot.RateLimitRemain >= 0 {
 			fields = append(fields, observability.Any("rate_limit_remaining", snapshot.RateLimitRemain))

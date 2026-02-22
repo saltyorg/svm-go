@@ -25,6 +25,10 @@ func NewMetricsHandler(metrics *observability.Metrics) fasthttp.RequestHandler {
 		writeCounter(&builder, "svm_revalidate_runs_total", "Total number of revalidation runs.", snapshot.RevalidateRuns)
 		writeCounter(&builder, "svm_upstream_requests_total", "Total number of upstream requests.", snapshot.UpstreamRequests)
 		writeCounter(&builder, "svm_upstream_errors_total", "Total number of upstream errors.", snapshot.UpstreamErrors)
+		writeCounter(&builder, "svm_refresh_updated_total", "Total number of background refreshes that updated cache records.", snapshot.RefreshUpdated)
+		writeCounter(&builder, "svm_refresh_not_modified_total", "Total number of background refreshes resolved by 304 Not Modified.", snapshot.RefreshNotMod)
+		writeCounter(&builder, "svm_refresh_skipped_total", "Total number of background refreshes skipped without an upstream call.", snapshot.RefreshSkipped)
+		writeCounter(&builder, "svm_refresh_failed_total", "Total number of background refreshes that failed.", snapshot.RefreshFailed)
 
 		_, _ = ctx.WriteString(builder.String())
 	}

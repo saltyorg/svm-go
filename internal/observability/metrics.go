@@ -11,6 +11,10 @@ type Metrics struct {
 	revalidateRuns   atomic.Uint64
 	upstreamRequests atomic.Uint64
 	upstreamErrors   atomic.Uint64
+	refreshUpdated   atomic.Uint64
+	refreshNotMod    atomic.Uint64
+	refreshSkipped   atomic.Uint64
+	refreshFailed    atomic.Uint64
 	rateLimitRemain  atomic.Int64
 }
 
@@ -21,6 +25,10 @@ type Snapshot struct {
 	RevalidateRuns   uint64
 	UpstreamRequests uint64
 	UpstreamErrors   uint64
+	RefreshUpdated   uint64
+	RefreshNotMod    uint64
+	RefreshSkipped   uint64
+	RefreshFailed    uint64
 	RateLimitRemain  int64
 }
 
@@ -71,6 +79,38 @@ func (m *Metrics) IncUpstreamError() {
 	m.upstreamErrors.Add(1)
 }
 
+// IncRefreshUpdated increments background-refresh updated counter.
+func (m *Metrics) IncRefreshUpdated() {
+	if m == nil {
+		return
+	}
+	m.refreshUpdated.Add(1)
+}
+
+// IncRefreshNotMod increments background-refresh not-modified counter.
+func (m *Metrics) IncRefreshNotMod() {
+	if m == nil {
+		return
+	}
+	m.refreshNotMod.Add(1)
+}
+
+// IncRefreshSkipped increments background-refresh skipped counter.
+func (m *Metrics) IncRefreshSkipped() {
+	if m == nil {
+		return
+	}
+	m.refreshSkipped.Add(1)
+}
+
+// IncRefreshFailed increments background-refresh failed counter.
+func (m *Metrics) IncRefreshFailed() {
+	if m == nil {
+		return
+	}
+	m.refreshFailed.Add(1)
+}
+
 // ObserveRateLimitRemaining stores the latest observed upstream rate-limit remaining value.
 func (m *Metrics) ObserveRateLimitRemaining(remaining int) {
 	if m == nil {
@@ -97,6 +137,10 @@ func (m *Metrics) Snapshot() Snapshot {
 		RevalidateRuns:   m.revalidateRuns.Load(),
 		UpstreamRequests: m.upstreamRequests.Load(),
 		UpstreamErrors:   m.upstreamErrors.Load(),
+		RefreshUpdated:   m.refreshUpdated.Load(),
+		RefreshNotMod:    m.refreshNotMod.Load(),
+		RefreshSkipped:   m.refreshSkipped.Load(),
+		RefreshFailed:    m.refreshFailed.Load(),
 		RateLimitRemain:  m.rateLimitRemain.Load(),
 	}
 }
