@@ -572,7 +572,7 @@ type fakeHitRecorderRuntime struct {
 	closeCalls int
 }
 
-func (f *fakeHitRecorderRuntime) RecordHit(string, time.Time) bool {
+func (f *fakeHitRecorderRuntime) RecordActivity(string, time.Time) bool {
 	return true
 }
 

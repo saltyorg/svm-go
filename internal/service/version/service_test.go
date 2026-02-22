@@ -147,6 +147,50 @@ func TestServiceHandleMissSelectsTokenForUpstreamRequest(t *testing.T) {
 	}
 }
 
+func TestServiceHandleMissMarksNewCacheEntryAsActive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 21, 21, 32, 30, 0, time.UTC)
+	tokenProvider := &countingTokenProvider{token: "token-a"}
+	upstream := &fakeUpstreamClient{
+		responseStatus: http.StatusOK,
+		responseBody:   `{"tag_name":"upstream"}`,
+	}
+	hitRecorder := &fakeHitSignalRecorder{enqueueResult: true}
+	service := NewService(
+		&fakeCacheStore{},
+		hitRecorder,
+		tokenProvider,
+		upstream,
+		nil,
+		nil,
+		cache.DefaultPolicy(),
+	)
+	service.now = func() time.Time { return now }
+
+	response := service.Handle(context.Background(), Request{
+		RawURL: "https://api.github.com/repos/org/repo/releases/latest",
+	})
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
+	}
+	if hitRecorder.calls != 1 {
+		t.Fatalf("expected one hit signal on cache insert, got %d", hitRecorder.calls)
+	}
+
+	expectedKey, err := cache.KeyFromURL("https://api.github.com/repos/org/repo/releases/latest")
+	if err != nil {
+		t.Fatalf("failed to build expected key: %v", err)
+	}
+	if hitRecorder.lastKey != expectedKey {
+		t.Fatalf("unexpected hit signal key: %q", hitRecorder.lastKey)
+	}
+	if !hitRecorder.lastAt.Equal(now) {
+		t.Fatalf("expected hit timestamp %v, got %v", now, hitRecorder.lastAt)
+	}
+}
+
 func TestServiceHandleMetricsCountHitMissAndUpstreamRequests(t *testing.T) {
 	t.Parallel()
 
@@ -1178,7 +1222,7 @@ type fakeHitSignalRecorder struct {
 	enqueueResult bool
 }
 
-func (f *fakeHitSignalRecorder) RecordHit(key string, hitAt time.Time) bool {
+func (f *fakeHitSignalRecorder) RecordActivity(key string, hitAt time.Time) bool {
 	f.calls++
 	f.lastKey = key
 	f.lastAt = hitAt

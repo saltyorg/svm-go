@@ -18,7 +18,7 @@ func TestHitRecorderRecordHitUpsertsInBackground(t *testing.T) {
 	defer recorder.Close()
 
 	hitAt := time.Date(2026, 2, 21, 21, 0, 0, 0, time.UTC)
-	if ok := recorder.RecordHit("cache-key-1", hitAt); !ok {
+	if ok := recorder.RecordActivity("cache-key-1", hitAt); !ok {
 		t.Fatal("expected hit signal to enqueue")
 	}
 
@@ -47,7 +47,7 @@ func TestHitRecorderDropsWhenQueueIsFull(t *testing.T) {
 	recorder := NewHitRecorder(index, 1, nil)
 	defer recorder.Close()
 
-	if ok := recorder.RecordHit("cache-key-1", time.Now()); !ok {
+	if ok := recorder.RecordActivity("cache-key-1", time.Now()); !ok {
 		t.Fatal("expected first hit signal to enqueue")
 	}
 
@@ -57,10 +57,10 @@ func TestHitRecorderDropsWhenQueueIsFull(t *testing.T) {
 		t.Fatal("timed out waiting for first upsert to start")
 	}
 
-	if ok := recorder.RecordHit("cache-key-2", time.Now()); !ok {
+	if ok := recorder.RecordActivity("cache-key-2", time.Now()); !ok {
 		t.Fatal("expected second hit signal to fill queue")
 	}
-	if ok := recorder.RecordHit("cache-key-3", time.Now()); ok {
+	if ok := recorder.RecordActivity("cache-key-3", time.Now()); ok {
 		t.Fatal("expected third hit signal to drop when queue is full")
 	}
 
@@ -98,7 +98,7 @@ func TestHitRecorderHandlesNilIndexer(t *testing.T) {
 	recorder := NewHitRecorder(nil, 1, nil)
 	defer recorder.Close()
 
-	if ok := recorder.RecordHit("cache-key", time.Now()); ok {
+	if ok := recorder.RecordActivity("cache-key", time.Now()); ok {
 		t.Fatal("expected enqueue failure for nil indexer")
 	}
 
@@ -178,10 +178,10 @@ func TestHitRecorderContinuesAfterUpsertError(t *testing.T) {
 	recorder := NewHitRecorder(index, 2, nil)
 	defer recorder.Close()
 
-	if ok := recorder.RecordHit("cache-key-1", time.Now()); !ok {
+	if ok := recorder.RecordActivity("cache-key-1", time.Now()); !ok {
 		t.Fatal("expected first enqueue success")
 	}
-	if ok := recorder.RecordHit("cache-key-2", time.Now()); !ok {
+	if ok := recorder.RecordActivity("cache-key-2", time.Now()); !ok {
 		t.Fatal("expected second enqueue success")
 	}
 

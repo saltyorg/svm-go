@@ -55,8 +55,8 @@ func NewHitRecorder(index ActiveKeyIndexer, queueSize int, logger *observability
 	return recorder
 }
 
-// RecordHit attempts to enqueue a hit signal without blocking the request path.
-func (r *HitRecorder) RecordHit(key string, hitAt time.Time) bool {
+// RecordActivity attempts to enqueue a hit signal without blocking the request path.
+func (r *HitRecorder) RecordActivity(key string, hitAt time.Time) bool {
 	if r == nil || r.index == nil || key == "" {
 		return false
 	}

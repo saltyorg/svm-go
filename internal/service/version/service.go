@@ -60,7 +60,7 @@ type readonlyCacheStore interface {
 
 // HitSignalRecorder defines non-blocking hit signal behavior for active-key tracking.
 type HitSignalRecorder interface {
-	RecordHit(key string, hitAt time.Time) bool
+	RecordActivity(key string, hitAt time.Time) bool
 }
 
 // UpstreamClient defines outbound client behavior used by the service.
@@ -175,7 +175,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 	if validCacheHit {
 		if !request.ForceRefresh {
 			if shouldServeNegativeCachedRecord(cachedRecord, now) {
-				s.recordHit(cacheKey, now)
+				s.recordActivity(cacheKey, now)
 				s.incCacheHit()
 
 				return Response{
@@ -187,7 +187,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			}
 
 			if !isNegativeCacheableStatus(cachedRecord.SourceStatus) {
-				s.recordHit(cacheKey, now)
+				s.recordActivity(cacheKey, now)
 				s.incCacheHit()
 
 				return Response{
@@ -265,7 +265,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 	if resp.StatusCode == http.StatusNotModified {
 		if hasConditionalCandidate {
 			s.logger.Info("using cached data after 304", observability.String("cache_key", cacheKey))
-			s.recordHit(cacheKey, now)
+			s.recordActivity(cacheKey, now)
 
 			cachedRecord.LastCheckedAt = now
 			cachedRecord.ExpiresAt = hardExpiresAt(now, s.policy.HardTTL)
@@ -318,6 +318,9 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			SourceStatus:  resp.StatusCode,
 		}
 		_, _ = s.setToCache(cacheKey, record)
+		if !cacheHit {
+			s.recordActivity(cacheKey, now)
+		}
 
 		return Response{
 			StatusCode:     http.StatusOK,
@@ -374,6 +377,9 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 				SourceStatus:  resp.StatusCode,
 			}
 			_, _ = s.setToCache(cacheKey, record)
+			if !cacheHit {
+				s.recordActivity(cacheKey, now)
+			}
 		}
 	}
 
@@ -472,11 +478,11 @@ func (s *Service) setToCache(key string, record cache.Record) (bool, error) {
 	return s.cache.Set(key, record)
 }
 
-func (s *Service) recordHit(key string, hitAt time.Time) {
+func (s *Service) recordActivity(key string, hitAt time.Time) {
 	if s == nil || s.hitRecorder == nil || key == "" {
 		return
 	}
-	_ = s.hitRecorder.RecordHit(key, hitAt)
+	_ = s.hitRecorder.RecordActivity(key, hitAt)
 }
 
 func (s *Service) incCacheHit() {

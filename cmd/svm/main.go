@@ -47,7 +47,7 @@ type refreshByKeyHandler interface {
 }
 
 type hitRecorderRuntime interface {
-	RecordHit(key string, hitAt time.Time) bool
+	RecordActivity(key string, hitAt time.Time) bool
 	ActiveKeysSince(ctx context.Context, since time.Time, limit int) ([]string, error)
 	Close()
 }
