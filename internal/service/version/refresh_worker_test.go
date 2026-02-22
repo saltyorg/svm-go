@@ -20,6 +20,8 @@ func TestRefreshWorkersProcessQueuedKeys(t *testing.T) {
 
 	refresher := newFakeRefreshByKeyRequester()
 	workers := newRefreshWorkers(queue, refresher, 1, 1000, nil, time.Now, true)
+	metrics := observability.NewMetrics()
+	workers.SetMetrics(metrics)
 	defer workers.Close()
 
 	if ok := queue.Enqueue("key-1"); !ok {
@@ -32,6 +34,9 @@ func TestRefreshWorkersProcessQueuedKeys(t *testing.T) {
 	refresher.waitForCalls(t, 2, time.Second)
 	if calls := refresher.callCount(); calls != 2 {
 		t.Fatalf("expected 2 refresh calls, got %d", calls)
+	}
+	if got := metrics.Snapshot().RefreshProcessed; got != 2 {
+		t.Fatalf("expected 2 processed refresh jobs, got %d", got)
 	}
 }
 

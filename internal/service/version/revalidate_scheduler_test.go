@@ -263,6 +263,55 @@ func TestRevalidateSchedulerSweepIncrementsRunMetric(t *testing.T) {
 	}
 }
 
+func TestRevalidateSchedulerSweepWaitsForProcessedJobsUntilContextDone(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 22, 0, 10, 0, 0, time.UTC)
+	source := &fakeActiveKeySource{keys: []string{"key-due"}}
+	store := &fakeSchedulerCacheStore{
+		records: map[string]cache.Record{
+			"key-due": {LastCheckedAt: now.Add(-time.Minute)},
+		},
+	}
+
+	policy := cache.DefaultPolicy()
+	policy.RevalidateInterval = time.Minute
+	policy.RevalidateEndpointsPerWorker = 1
+
+	scheduler := newRevalidateScheduler(
+		source,
+		store,
+		&fakeRefreshEnqueuer{},
+		policy,
+		nil,
+		func() time.Time { return now },
+		false,
+		nil,
+	)
+	metrics := observability.NewMetrics()
+	scheduler.SetMetrics(metrics)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	result := scheduler.Sweep(ctx)
+	elapsed := time.Since(start)
+
+	if result.Enqueued != 1 {
+		t.Fatalf("expected 1 enqueued key, got %d", result.Enqueued)
+	}
+	if elapsed < 20*time.Millisecond {
+		t.Fatalf("expected sweep to wait for completion or timeout, took only %s", elapsed)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected sweep timeout-bound wait, took %s", elapsed)
+	}
+	if got := metrics.Snapshot().RefreshProcessed; got != 0 {
+		t.Fatalf("expected 0 processed jobs without workers, got %d", got)
+	}
+}
+
 func TestRevalidateSchedulerFinishSweepLogsRefreshDeltas(t *testing.T) {
 	t.Parallel()
 

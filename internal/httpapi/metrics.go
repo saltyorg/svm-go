@@ -29,6 +29,7 @@ func NewMetricsHandler(metrics *observability.Metrics) fasthttp.RequestHandler {
 		writeCounter(&builder, "svm_refresh_not_modified_total", "Total number of background refreshes resolved by 304 Not Modified.", snapshot.RefreshNotMod)
 		writeCounter(&builder, "svm_refresh_skipped_total", "Total number of background refreshes skipped without an upstream call.", snapshot.RefreshSkipped)
 		writeCounter(&builder, "svm_refresh_failed_total", "Total number of background refreshes that failed.", snapshot.RefreshFailed)
+		writeCounter(&builder, "svm_refresh_processed_total", "Total number of background refresh queue jobs processed by workers.", snapshot.RefreshProcessed)
 
 		_, _ = ctx.WriteString(builder.String())
 	}

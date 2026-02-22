@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"svm/internal/cache"
@@ -29,6 +30,7 @@ type RefreshWorkers struct {
 	minInterval        time.Duration
 	initialWorkerCount int
 	countUpdates       chan int
+	metrics            atomic.Pointer[observability.Metrics]
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -127,6 +129,14 @@ func (w *RefreshWorkers) SetWorkerCount(workerCount int) {
 	}
 }
 
+// SetMetrics attaches optional runtime metrics counters.
+func (w *RefreshWorkers) SetMetrics(metrics *observability.Metrics) {
+	if w == nil {
+		return
+	}
+	w.metrics.Store(metrics)
+}
+
 // Close stops all refresh workers.
 func (w *RefreshWorkers) Close() {
 	if w == nil || w.cancel == nil {
@@ -221,6 +231,9 @@ func (w *RefreshWorkers) runWorker(ctx context.Context) {
 		}
 
 		_ = w.refresher.RefreshByKey(key)
+		if metrics := w.metrics.Load(); metrics != nil {
+			metrics.IncRefreshProcessed()
+		}
 		lastRunAt = w.now()
 	}
 }

@@ -55,6 +55,8 @@ type RevalidateScheduler struct {
 	done   chan struct{}
 }
 
+const sweepCompletionPollInterval = 10 * time.Millisecond
+
 // NewRevalidateScheduler creates and starts a scheduler worker.
 func NewRevalidateScheduler(
 	activeKeys activeKeySource,
@@ -160,6 +162,11 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 
 	dueKeys := make([]string, 0, len(keys))
+	metrics := s.metrics
+	startProcessed := uint64(0)
+	if metrics != nil {
+		startProcessed = metrics.Snapshot().RefreshProcessed
+	}
 	result := RevalidateSweepResult{
 		CandidateKeys: len(keys),
 	}
@@ -202,6 +209,9 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 			}
 		}
 	}
+	if metrics != nil && result.Enqueued > 0 {
+		s.waitForEnqueuedRefreshes(ctx, metrics, startProcessed, uint64(result.Enqueued))
+	}
 
 	return s.finishSweep(result)
 }
@@ -224,7 +234,7 @@ func (s *RevalidateScheduler) run(ctx context.Context, tickCh <-chan time.Time) 
 		case <-ctx.Done():
 			return
 		case <-tickCh:
-			_ = s.Sweep(context.Background())
+			_ = s.Sweep(ctx)
 		}
 	}
 }
@@ -297,6 +307,35 @@ func partitionRefreshKeys(keys []string, perWorker int) [][]string {
 	}
 
 	return partitions
+}
+
+func (s *RevalidateScheduler) waitForEnqueuedRefreshes(
+	ctx context.Context,
+	metrics *observability.Metrics,
+	startProcessed, expectedProcessed uint64,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if metrics == nil || expectedProcessed == 0 {
+		return
+	}
+
+	target := startProcessed + expectedProcessed
+	ticker := time.NewTicker(sweepCompletionPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if metrics.Snapshot().RefreshProcessed >= target {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) RevalidateSweepResult {

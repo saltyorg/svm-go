@@ -19,6 +19,7 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	metrics.IncRefreshNotMod()
 	metrics.IncRefreshSkipped()
 	metrics.IncRefreshFailed()
+	metrics.IncRefreshProcessed()
 	metrics.ObserveRateLimitRemaining(1234)
 
 	snapshot := metrics.Snapshot()
@@ -49,6 +50,9 @@ func TestMetricsSnapshotCountsIncrements(t *testing.T) {
 	if snapshot.RefreshFailed != 1 {
 		t.Fatalf("expected refresh failed to be 1, got %d", snapshot.RefreshFailed)
 	}
+	if snapshot.RefreshProcessed != 1 {
+		t.Fatalf("expected refresh processed to be 1, got %d", snapshot.RefreshProcessed)
+	}
 	if snapshot.RateLimitRemain != 1234 {
 		t.Fatalf("expected rate-limit remaining to be 1234, got %d", snapshot.RateLimitRemain)
 	}
@@ -78,6 +82,7 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 				metrics.IncRefreshNotMod()
 				metrics.IncRefreshSkipped()
 				metrics.IncRefreshFailed()
+				metrics.IncRefreshProcessed()
 				metrics.ObserveRateLimitRemaining(5000)
 			}
 		}()
@@ -113,6 +118,9 @@ func TestMetricsConcurrentIncrementsAreSafe(t *testing.T) {
 	}
 	if snapshot.RefreshFailed != want {
 		t.Fatalf("expected refresh failed to be %d, got %d", want, snapshot.RefreshFailed)
+	}
+	if snapshot.RefreshProcessed != want {
+		t.Fatalf("expected refresh processed to be %d, got %d", want, snapshot.RefreshProcessed)
 	}
 	if snapshot.RateLimitRemain != 5000 {
 		t.Fatalf("expected rate-limit remaining to be 5000, got %d", snapshot.RateLimitRemain)

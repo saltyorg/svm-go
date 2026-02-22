@@ -22,6 +22,7 @@ func TestMetricsHandlerReturnsPrometheusText(t *testing.T) {
 	metrics.IncRefreshNotMod()
 	metrics.IncRefreshSkipped()
 	metrics.IncRefreshFailed()
+	metrics.IncRefreshProcessed()
 
 	handler := NewMetricsHandler(metrics)
 
@@ -45,6 +46,7 @@ func TestMetricsHandlerReturnsPrometheusText(t *testing.T) {
 	assertContainsLine(t, body, "svm_refresh_not_modified_total 1")
 	assertContainsLine(t, body, "svm_refresh_skipped_total 1")
 	assertContainsLine(t, body, "svm_refresh_failed_total 1")
+	assertContainsLine(t, body, "svm_refresh_processed_total 1")
 }
 
 func assertContainsLine(t *testing.T, body, expected string) {

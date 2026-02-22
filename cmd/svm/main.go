@@ -256,6 +256,7 @@ func (app *App) startRevalidationRuntime() {
 		app.cachePolicy.RevalidatePerWorkerRPS,
 		app.getLogger(),
 	)
+	workers.SetMetrics(app.metrics)
 	app.refreshWorkers = workers
 
 	scheduler := versionservice.NewRevalidateScheduler(
