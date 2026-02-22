@@ -39,10 +39,9 @@ func BenchmarkVersionServiceCacheHit(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
 	ctx := context.Background()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		benchmarkVersionResponseSink = service.Handle(ctx, request)
 	}
 }
@@ -69,9 +68,8 @@ func BenchmarkVersionEndpointCacheHit(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx.Request.SetRequestURI(benchmarkVersionRequestURI)
 		ctx.Response.Reset()
 		router(ctx)

@@ -650,8 +650,8 @@ func TestServiceHandleHardExpiredPositiveCacheFallsBackToSynchronousUpstreamFetc
 	if upstream.getCalls != 1 {
 		t.Fatalf("expected one upstream call after hard-expired cache hit, got %d", upstream.getCalls)
 	}
-	if upstream.lastHeaders["If-None-Match"] != "" {
-		t.Fatalf("expected no If-None-Match header for hard-expired entry, got %q", upstream.lastHeaders["If-None-Match"])
+	if upstream.lastHeaders["If-None-Match"] != `"etag-old"` {
+		t.Fatalf("expected If-None-Match %q for hard-expired entry, got %q", `"etag-old"`, upstream.lastHeaders["If-None-Match"])
 	}
 	if cacheStore.setCalls != 1 {
 		t.Fatalf("expected one cache write with refreshed upstream data, got %d", cacheStore.setCalls)
@@ -669,6 +669,74 @@ func TestServiceHandleHardExpiredPositiveCacheFallsBackToSynchronousUpstreamFetc
 	}
 	if string(rawBody) != newPayload {
 		t.Fatalf("expected payload %s, got %s", newPayload, string(rawBody))
+	}
+}
+
+func TestServiceHandleHardExpiredPositiveCacheRevalidatesWith304UsingCachedPayload(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 21, 22, 13, 0, 0, time.UTC)
+	oldPayload := []byte(`{"tag_name":"cached-old"}`)
+	cacheStore := &fakeCacheStore{
+		record: cache.Record{
+			Payload:       oldPayload,
+			ETag:          `"etag-old"`,
+			FetchedAt:     now.Add(-48 * time.Hour),
+			LastCheckedAt: now.Add(-48 * time.Hour),
+			ExpiresAt:     now.Add(-time.Second),
+			SourceStatus:  http.StatusOK,
+		},
+		hit: true,
+	}
+	upstream := &fakeUpstreamClient{responseStatus: http.StatusNotModified}
+	hitRecorder := &fakeHitSignalRecorder{enqueueResult: true}
+	policy := cache.DefaultPolicy()
+	service := NewService(
+		cacheStore,
+		hitRecorder,
+		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
+		upstream,
+		nil,
+		nil,
+		policy,
+	)
+	service.now = func() time.Time { return now }
+
+	response := service.Handle(context.Background(), Request{
+		RawURL: "https://api.github.com/repos/org/repo/releases/latest",
+	})
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
+	}
+	if response.CacheStatus != CacheStatusRevalidated {
+		t.Fatalf("expected cache status %q, got %q", CacheStatusRevalidated, response.CacheStatus)
+	}
+	if response.UpstreamStatus != http.StatusNotModified {
+		t.Fatalf("expected upstream status %d, got %d", http.StatusNotModified, response.UpstreamStatus)
+	}
+	if upstream.getCalls != 1 {
+		t.Fatalf("expected one upstream call after hard-expired cache hit, got %d", upstream.getCalls)
+	}
+	if upstream.lastHeaders["If-None-Match"] != `"etag-old"` {
+		t.Fatalf("expected If-None-Match %q for hard-expired entry, got %q", `"etag-old"`, upstream.lastHeaders["If-None-Match"])
+	}
+	if cacheStore.setCalls != 1 {
+		t.Fatalf("expected one cache write after upstream 304, got %d", cacheStore.setCalls)
+	}
+	if !cacheStore.lastSet.ExpiresAt.Equal(now.Add(policy.HardTTL)) {
+		t.Fatalf("expected ExpiresAt %v, got %v", now.Add(policy.HardTTL), cacheStore.lastSet.ExpiresAt)
+	}
+	if hitRecorder.calls != 1 {
+		t.Fatalf("expected one hit signal on 304 revalidation, got %d", hitRecorder.calls)
+	}
+
+	rawBody, ok := response.Body.(json.RawMessage)
+	if !ok {
+		t.Fatalf("expected response body type %T, got %T", json.RawMessage{}, response.Body)
+	}
+	if string(rawBody) != string(oldPayload) {
+		t.Fatalf("expected payload %s, got %s", string(oldPayload), string(rawBody))
 	}
 }
 

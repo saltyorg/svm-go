@@ -201,8 +201,9 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 
 	}
 
+	hasConditionalCandidate := cacheHit && !isNegativeCacheableStatus(cachedRecord.SourceStatus) && cachedRecord.ETag != ""
 	etag := ""
-	if validCacheHit && !isNegativeCacheableStatus(cachedRecord.SourceStatus) {
+	if hasConditionalCandidate {
 		etag = cachedRecord.ETag
 	}
 
@@ -262,7 +263,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 	)
 
 	if resp.StatusCode == http.StatusNotModified {
-		if validCacheHit {
+		if hasConditionalCandidate {
 			s.logger.Info("using cached data after 304", observability.String("cache_key", cacheKey))
 			s.recordHit(cacheKey, now)
 
