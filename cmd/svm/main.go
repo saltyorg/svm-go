@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -31,11 +32,12 @@ const requestLogQueueSize = 256
 var fallbackLogger = observability.NewLogger(os.Stdout)
 
 type requestLogEntry struct {
-	clientIP   string
-	method     string
-	requestURI string
-	proto      string
-	statusCode int
+	clientIP    string
+	method      string
+	requestURI  string
+	upstreamURL string
+	proto       string
+	statusCode  int
 }
 
 type versionServiceHandler interface {
@@ -339,11 +341,12 @@ func (app *App) enqueueClientRequestLog(ctx *fasthttp.RequestCtx) {
 	}
 
 	entry := requestLogEntry{
-		clientIP:   app.getClientIP(ctx),
-		method:     string(ctx.Method()),
-		requestURI: string(ctx.Path()),
-		proto:      proto,
-		statusCode: statusCode,
+		clientIP:    app.getClientIP(ctx),
+		method:      string(ctx.Method()),
+		requestURI:  string(ctx.Path()),
+		upstreamURL: sanitizedUpstreamURLForAccessLog(ctx),
+		proto:       proto,
+		statusCode:  statusCode,
 	}
 
 	select {
@@ -360,15 +363,34 @@ func (app *App) processRequestLogs() {
 	logger := app.getLogger()
 
 	for entry := range app.requestLogQueue {
-		logger.Info(
-			"request complete",
+		fields := []observability.Field{
 			observability.String("client_ip", entry.clientIP),
 			observability.String("method", entry.method),
 			observability.String("request_uri", entry.requestURI),
 			observability.String("protocol", entry.proto),
 			observability.Int("status", entry.statusCode),
-		)
+		}
+		if entry.upstreamURL != "" {
+			fields = append(fields, observability.String("upstream_url", entry.upstreamURL))
+		}
+		logger.Info("request complete", fields...)
 	}
+}
+
+func sanitizedUpstreamURLForAccessLog(ctx *fasthttp.RequestCtx) string {
+	if ctx == nil || string(ctx.Path()) != "/version" {
+		return ""
+	}
+	raw := strings.TrimSpace(string(ctx.QueryArgs().Peek("url")))
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (app *App) shutdownDrainTimeout() time.Duration {

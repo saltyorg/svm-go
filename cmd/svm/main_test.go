@@ -128,6 +128,30 @@ func TestVersionHandlerDelegatesToVersionService(t *testing.T) {
 	}
 }
 
+func TestSanitizedUpstreamURLForAccessLogPreservesRepositoryPath(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRequestCtx(
+		fasthttp.MethodGet,
+		"/version?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fhashicorp%2Fterraform%2Freleases%2Flatest%3Faccess_token%3Dsecret",
+	)
+
+	got := sanitizedUpstreamURLForAccessLog(ctx)
+	want := "https://api.github.com/repos/hashicorp/terraform/releases/latest"
+	if got != want {
+		t.Fatalf("expected sanitized upstream URL %q, got %q", want, got)
+	}
+}
+
+func TestSanitizedUpstreamURLForAccessLogSkipsOtherRoutes(t *testing.T) {
+	t.Parallel()
+
+	ctx := newRequestCtx(fasthttp.MethodGet, "/ping?url=https://api.github.com/repos/org/repo")
+	if got := sanitizedUpstreamURLForAccessLog(ctx); got != "" {
+		t.Fatalf("expected no upstream URL for non-version route, got %q", got)
+	}
+}
+
 func TestVersionHandlerParsesRefreshQueryOverride(t *testing.T) {
 	t.Parallel()
 
