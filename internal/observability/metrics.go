@@ -16,6 +16,7 @@ type Metrics struct {
 	refreshSkipped   atomic.Uint64
 	refreshFailed    atomic.Uint64
 	refreshProcessed atomic.Uint64
+	accessLogDropped atomic.Uint64
 	rateLimitRemain  atomic.Int64
 }
 
@@ -31,6 +32,7 @@ type Snapshot struct {
 	RefreshSkipped   uint64
 	RefreshFailed    uint64
 	RefreshProcessed uint64
+	AccessLogDropped uint64
 	RateLimitRemain  int64
 }
 
@@ -121,6 +123,14 @@ func (m *Metrics) IncRefreshProcessed() {
 	m.refreshProcessed.Add(1)
 }
 
+// IncAccessLogDropped increments the number of access-log entries dropped due to backpressure.
+func (m *Metrics) IncAccessLogDropped() {
+	if m == nil {
+		return
+	}
+	m.accessLogDropped.Add(1)
+}
+
 // ObserveRateLimitRemaining stores the latest observed upstream rate-limit remaining value.
 func (m *Metrics) ObserveRateLimitRemaining(remaining int) {
 	if m == nil {
@@ -152,6 +162,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		RefreshSkipped:   m.refreshSkipped.Load(),
 		RefreshFailed:    m.refreshFailed.Load(),
 		RefreshProcessed: m.refreshProcessed.Load(),
+		AccessLogDropped: m.accessLogDropped.Load(),
 		RateLimitRemain:  m.rateLimitRemain.Load(),
 	}
 }

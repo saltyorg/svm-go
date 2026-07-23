@@ -2,7 +2,7 @@ package cache
 
 import "time"
 
-// Record is the canonical cache payload and metadata envelope shared by L1/L2.
+// Record is the canonical in-memory cache payload and metadata envelope.
 type Record struct {
 	Payload       []byte    `json:"payload"`
 	ETag          string    `json:"etag"`

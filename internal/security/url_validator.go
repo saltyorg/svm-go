@@ -17,6 +17,8 @@ var (
 	ErrUpstreamHostNotAllowed = errors.New("upstream host is not allowlisted")
 	// ErrURLUserinfoNotAllowed prevents credentials from being embedded in upstream URLs.
 	ErrURLUserinfoNotAllowed = errors.New("url userinfo is not allowed")
+	// ErrHTTPSPortOnly prevents requests to unexpected services on allowlisted hosts.
+	ErrHTTPSPortOnly = errors.New("url port must be 443")
 )
 
 // ParseHTTPSURL parses and validates a request URL for upstream fetching.
@@ -54,6 +56,9 @@ func parseHTTPSURL(rawURL string) (*url.URL, error) {
 	}
 	if parsedURL.User != nil {
 		return nil, ErrURLUserinfoNotAllowed
+	}
+	if port := parsedURL.Port(); port != "" && port != "443" {
+		return nil, ErrHTTPSPortOnly
 	}
 
 	return parsedURL, nil

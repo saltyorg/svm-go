@@ -388,67 +388,6 @@ func TestServiceHandleRefreshOverrideBypassesFreshCacheHit(t *testing.T) {
 	}
 }
 
-func TestServiceHandleHydratesFromL2MissWithoutUpstreamCall(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 2, 21, 22, 0, 0, 0, time.UTC)
-	rawURL := "https://api.github.com/repos/org/repo/releases/latest"
-	cacheKey, err := cache.KeyFromURL(rawURL)
-	if err != nil {
-		t.Fatalf("failed to build cache key: %v", err)
-	}
-
-	l1Store := l1.NewCacheWithMaxBytes(1 << 20)
-	hydratedRecord := cache.Record{
-		Payload:       []byte(`{"tag_name":"v2.4.6"}`),
-		LastCheckedAt: now,
-	}
-	l2Store := &fakeHydrationL2Store{
-		records: map[string]cache.Record{
-			cacheKey: hydratedRecord,
-		},
-	}
-	facade := cache.NewFacade(l1Store, l2Store, nil)
-	upstream := &fakeUpstreamClient{}
-	service := NewService(
-		facade,
-		nil,
-		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
-		upstream,
-		nil,
-		nil,
-		cache.DefaultPolicy(),
-	)
-	service.now = func() time.Time { return now }
-
-	response := service.Handle(context.Background(), Request{RawURL: rawURL})
-
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
-	}
-	if upstream.getCalls != 0 {
-		t.Fatalf("expected no upstream calls on hydrate hit, got %d", upstream.getCalls)
-	}
-	if l2Store.getCalls != 1 {
-		t.Fatalf("expected one L2 hydration read, got %d", l2Store.getCalls)
-	}
-	backfilledRecord, hit := l1Store.Get(cacheKey)
-	if !hit {
-		t.Fatal("expected L2 hydrate hit to backfill L1")
-	}
-	if string(backfilledRecord.Payload) != string(hydratedRecord.Payload) {
-		t.Fatalf("expected L1 payload %s, got %s", string(hydratedRecord.Payload), string(backfilledRecord.Payload))
-	}
-
-	rawBody, ok := response.Body.(json.RawMessage)
-	if !ok {
-		t.Fatalf("expected response body type %T, got %T", json.RawMessage{}, response.Body)
-	}
-	if string(rawBody) != string(hydratedRecord.Payload) {
-		t.Fatalf("expected payload %s, got %s", string(hydratedRecord.Payload), string(rawBody))
-	}
-}
-
 func TestServiceHandleMissPerformsSynchronousUpstreamRefresh(t *testing.T) {
 	t.Parallel()
 
@@ -460,12 +399,11 @@ func TestServiceHandleMissPerformsSynchronousUpstreamRefresh(t *testing.T) {
 	}
 
 	l1Store := l1.NewCacheWithMaxBytes(1 << 20)
-	l2Store := &fakeHydrationL2Store{records: map[string]cache.Record{}}
-	facade := cache.NewFacade(l1Store, l2Store, nil)
+	store := l1.NewStore(l1Store)
 	upstream := &fakeUpstreamClient{}
 	policy := cache.DefaultPolicy()
 	service := NewService(
-		facade,
+		store,
 		nil,
 		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
 		upstream,
@@ -479,9 +417,6 @@ func TestServiceHandleMissPerformsSynchronousUpstreamRefresh(t *testing.T) {
 
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
-	}
-	if l2Store.getCalls != 2 {
-		t.Fatalf("expected cache recheck by the coalesced miss leader, got %d L2 reads", l2Store.getCalls)
 	}
 	if upstream.getCalls != 1 {
 		t.Fatalf("expected one upstream call on cache miss, got %d", upstream.getCalls)
@@ -506,89 +441,6 @@ func TestServiceHandleMissPerformsSynchronousUpstreamRefresh(t *testing.T) {
 	}
 	if string(rawBody) != `{"tag_name":"upstream"}` {
 		t.Fatalf("expected response payload %s, got %s", `{"tag_name":"upstream"}`, string(rawBody))
-	}
-}
-
-func TestServiceHandleMissReturnsWhenWriteBehindDrops(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 2, 21, 22, 7, 0, 0, time.UTC)
-	rawURL := "https://api.github.com/repos/org/repo/releases/latest"
-	cacheKey, err := cache.KeyFromURL(rawURL)
-	if err != nil {
-		t.Fatalf("failed to build cache key: %v", err)
-	}
-
-	l1Store := l1.NewCacheWithMaxBytes(1 << 20)
-	writeBehind := &fakeDroppingWriteBehind{}
-	facade := cache.NewFacade(l1Store, nil, writeBehind)
-	upstream := &fakeUpstreamClient{
-		responseStatus: http.StatusOK,
-		responseBody:   `{"tag_name":"write-behind-drop"}`,
-	}
-	service := NewService(
-		facade,
-		nil,
-		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
-		upstream,
-		nil,
-		nil,
-		cache.DefaultPolicy(),
-	)
-	service.now = func() time.Time { return now }
-
-	start := time.Now()
-	response := service.Handle(context.Background(), Request{RawURL: rawURL})
-	elapsed := time.Since(start)
-
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
-	}
-	if response.CacheStatus != CacheStatusMiss {
-		t.Fatalf("expected cache status %q, got %q", CacheStatusMiss, response.CacheStatus)
-	}
-	if upstream.getCalls != 1 {
-		t.Fatalf("expected one upstream call, got %d", upstream.getCalls)
-	}
-	if writeBehind.enqueueCalls != 1 {
-		t.Fatalf("expected one write-behind enqueue attempt, got %d", writeBehind.enqueueCalls)
-	}
-	if writeBehind.lastKey != cacheKey {
-		t.Fatalf("expected write-behind key %q, got %q", cacheKey, writeBehind.lastKey)
-	}
-	if string(writeBehind.lastRecord.Payload) != `{"tag_name":"write-behind-drop"}` {
-		t.Fatalf(
-			"expected write-behind payload %s, got %s",
-			`{"tag_name":"write-behind-drop"}`,
-			string(writeBehind.lastRecord.Payload),
-		)
-	}
-	if elapsed > 50*time.Millisecond {
-		t.Fatalf("expected write-behind drop to be non-blocking, request took %s", elapsed)
-	}
-
-	record, hit := l1Store.Get(cacheKey)
-	if !hit {
-		t.Fatal("expected refreshed record stored in L1 even when write-behind drops")
-	}
-	if string(record.Payload) != `{"tag_name":"write-behind-drop"}` {
-		t.Fatalf(
-			"expected L1 payload %s, got %s",
-			`{"tag_name":"write-behind-drop"}`,
-			string(record.Payload),
-		)
-	}
-
-	rawBody, ok := response.Body.(json.RawMessage)
-	if !ok {
-		t.Fatalf("expected response body type %T, got %T", json.RawMessage{}, response.Body)
-	}
-	if string(rawBody) != `{"tag_name":"write-behind-drop"}` {
-		t.Fatalf(
-			"expected response payload %s, got %s",
-			`{"tag_name":"write-behind-drop"}`,
-			string(rawBody),
-		)
 	}
 }
 
@@ -822,6 +674,9 @@ func TestServiceHandleRefreshOverrideOnStaleHitReplacesPayloadAndETagOn200(t *te
 
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
+	}
+	if response.CacheStatus != CacheStatusBypass {
+		t.Fatalf("expected cache status %q, got %q", CacheStatusBypass, response.CacheStatus)
 	}
 	if upstream.getCalls != 1 {
 		t.Fatalf("expected one upstream call on stale hit, got %d", upstream.getCalls)
@@ -1091,7 +946,7 @@ func TestServiceHandleFreshHitNotBlockedByInFlightBackgroundRefresh(t *testing.T
 
 	upstream := newBlockingUpstreamClient(http.StatusNotModified, "")
 	service := NewService(
-		cache.NewFacade(l1Store, nil, nil),
+		l1.NewStore(l1Store),
 		nil,
 		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
 		upstream,
@@ -1162,6 +1017,46 @@ func TestServiceHandleCoalescesConcurrentCacheMisses(t *testing.T) {
 	}
 	if calls := upstream.callCount(); calls != 1 {
 		t.Fatalf("expected one coalesced upstream request, got %d", calls)
+	}
+}
+
+func TestServiceCoalescedFetchSurvivesLeaderCancellation(t *testing.T) {
+	t.Parallel()
+
+	rawURL := "https://api.github.com/repos/org/repo/releases/latest"
+	upstream := newBlockingUpstreamClient(http.StatusOK, `{"tag_name":"v1"}`)
+	service := NewService(
+		&fakeCacheStore{},
+		nil,
+		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
+		upstream,
+		nil,
+		nil,
+		cache.DefaultPolicy(),
+	)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderResponse := make(chan Response, 1)
+	go func() {
+		leaderResponse <- service.Handle(leaderCtx, Request{RawURL: rawURL})
+	}()
+	upstream.waitStarted(t)
+
+	followerResponse := make(chan Response, 1)
+	go func() {
+		followerResponse <- service.Handle(context.Background(), Request{RawURL: rawURL})
+	}()
+	cancelLeader()
+	if response := <-leaderResponse; response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected canceled leader status %d, got %d", http.StatusGatewayTimeout, response.StatusCode)
+	}
+
+	upstream.release()
+	if response := <-followerResponse; response.StatusCode != http.StatusOK {
+		t.Fatalf("expected follower status %d, got %d", http.StatusOK, response.StatusCode)
+	}
+	if calls := upstream.callCount(); calls != 1 {
+		t.Fatalf("expected one shared upstream request, got %d", calls)
 	}
 }
 
@@ -1290,20 +1185,6 @@ func (f *fakeHitSignalRecorder) RecordActivity(key string, hitAt time.Time) bool
 	return f.enqueueResult
 }
 
-type fakeDroppingWriteBehind struct {
-	enqueueCalls int
-	lastKey      string
-	lastRecord   cache.Record
-}
-
-func (f *fakeDroppingWriteBehind) Enqueue(key string, record cache.Record) bool {
-	f.enqueueCalls++
-	f.lastKey = key
-	f.lastRecord = record
-	f.lastRecord.Payload = append([]byte(nil), record.Payload...)
-	return false
-}
-
 type fakeUpstreamClient struct {
 	getCalls        int
 	lastHeaders     map[string]string
@@ -1359,23 +1240,6 @@ func (f *fakeUpstreamClient) Get(_ context.Context, _ string, token, etag string
 }
 
 func (f *fakeUpstreamClient) ObserveRateLimit(string, *http.Response, upstreamgithub.RateLimitedTokenObserver) {
-}
-
-type fakeHydrationL2Store struct {
-	records  map[string]cache.Record
-	getCalls int
-}
-
-func (f *fakeHydrationL2Store) Get(_ context.Context, key string) (*cache.Record, bool, error) {
-	f.getCalls++
-	record, ok := f.records[key]
-	if !ok {
-		return nil, false, nil
-	}
-
-	cloned := record
-	cloned.Payload = append([]byte(nil), record.Payload...)
-	return &cloned, true, nil
 }
 
 type blockingUpstreamClient struct {

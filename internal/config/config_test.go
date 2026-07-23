@@ -38,6 +38,42 @@ func TestLoadUsesDefaultAllowedUpstreamHostsWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadTrimsAndDeduplicatesTokens(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GITHUB_PATS", " token-a,token-b, token-a ,,")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	want := []string{"token-a", "token-b"}
+	if !reflect.DeepEqual(cfg.GitHubPATs, want) {
+		t.Fatalf("expected tokens %v, got %v", want, cfg.GitHubPATs)
+	}
+}
+
+func TestLoadRejectsNoUsableTokens(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GITHUB_PATS", " , , ")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unusable token list error")
+	}
+}
+
+func TestLoadRejectsInvalidPortAndNegativeThreshold(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PORT", "70000")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid port error")
+	}
+
+	setRequiredEnv(t)
+	t.Setenv("API_USAGE_THRESHOLD", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected negative threshold error")
+	}
+}
+
 func TestLoadRejectsExplicitlyEmptyAllowedUpstreamHosts(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("ALLOWED_UPSTREAM_HOSTS", " , , ")
@@ -67,15 +103,12 @@ func TestLoadParsesCachePolicyOverrides(t *testing.T) {
 	t.Setenv("CACHE_NEGATIVE_TTL", "15m")
 	t.Setenv("REVALIDATE_INTERVAL", "90s")
 	t.Setenv("REVALIDATE_LOOKBACK", "14d")
-	t.Setenv("REVALIDATE_ENDPOINTS_PER_WORKER", "50")
+	t.Setenv("REVALIDATE_WORKERS", "3")
 	t.Setenv("REVALIDATE_PER_WORKER_RPS", "2")
-	t.Setenv("WRITE_BEHIND_QUEUE_SIZE", "128")
-	t.Setenv("WRITE_BEHIND_FLUSH_INTERVAL", "3s")
-	t.Setenv("WRITE_BEHIND_RETRY_MAX_INTERVAL", "45s")
-	t.Setenv("WRITE_BEHIND_RETRY_MAX_AGE", "10m")
+	t.Setenv("REFRESH_QUEUE_SIZE", "128")
 	t.Setenv("CACHE_L1_MAX_GB", "2.5")
 	t.Setenv("MAX_UPSTREAM_RESPONSE_BYTES", "2048")
-	t.Setenv("SHUTDOWN_DRAIN_TIMEOUT", "4s")
+	t.Setenv("SHUTDOWN_TIMEOUT", "4s")
 
 	cfg, err := Load()
 	if err != nil {
@@ -98,29 +131,20 @@ func TestLoadParsesCachePolicyOverrides(t *testing.T) {
 	if got.MaxUpstreamResponseBytes != 2048 {
 		t.Fatalf("expected MaxUpstreamResponseBytes 2048, got %d", got.MaxUpstreamResponseBytes)
 	}
-	if got.RevalidateEndpointsPerWorker != 50 {
-		t.Fatalf("expected RevalidateEndpointsPerWorker 50, got %d", got.RevalidateEndpointsPerWorker)
+	if got.RevalidateWorkers != 3 {
+		t.Fatalf("expected RevalidateWorkers 3, got %d", got.RevalidateWorkers)
 	}
 	if got.RevalidatePerWorkerRPS != 2 {
 		t.Fatalf("expected RevalidatePerWorkerRPS 2, got %d", got.RevalidatePerWorkerRPS)
 	}
-	if got.WriteBehindQueueSize != 128 {
-		t.Fatalf("expected WriteBehindQueueSize 128, got %d", got.WriteBehindQueueSize)
-	}
-	if got.WriteBehindFlushInterval != 3*time.Second {
-		t.Fatalf("expected WriteBehindFlushInterval 3s, got %s", got.WriteBehindFlushInterval)
-	}
-	if got.WriteBehindRetryMaxInterval != 45*time.Second {
-		t.Fatalf("expected WriteBehindRetryMaxInterval 45s, got %s", got.WriteBehindRetryMaxInterval)
-	}
-	if got.WriteBehindRetryMaxAge != 10*time.Minute {
-		t.Fatalf("expected WriteBehindRetryMaxAge 10m, got %s", got.WriteBehindRetryMaxAge)
+	if got.RefreshQueueSize != 128 {
+		t.Fatalf("expected RefreshQueueSize 128, got %d", got.RefreshQueueSize)
 	}
 	if got.L1MaxGB != 2.5 {
 		t.Fatalf("expected L1MaxGB 2.5, got %v", got.L1MaxGB)
 	}
-	if got.ShutdownDrainTimeout != 4*time.Second {
-		t.Fatalf("expected ShutdownDrainTimeout 4s, got %s", got.ShutdownDrainTimeout)
+	if got.ShutdownTimeout != 4*time.Second {
+		t.Fatalf("expected ShutdownTimeout 4s, got %s", got.ShutdownTimeout)
 	}
 }
 
@@ -140,7 +164,6 @@ func TestLoadRejectsInvalidCachePolicyOverride(t *testing.T) {
 func TestLoadRejectsMissingRequiredEnvironmentVariables(t *testing.T) {
 	t.Setenv("GITHUB_PATS", "")
 	t.Setenv("API_USAGE_THRESHOLD", "50")
-	t.Setenv("REDIS_HOST", "localhost")
 
 	_, err := Load()
 	if err == nil {
@@ -168,5 +191,4 @@ func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GITHUB_PATS", "pat-1,pat-2")
 	t.Setenv("API_USAGE_THRESHOLD", "50")
-	t.Setenv("REDIS_HOST", "localhost")
 }

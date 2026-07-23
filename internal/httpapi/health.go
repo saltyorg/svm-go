@@ -1,17 +1,11 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"time"
 
 	"github.com/valyala/fasthttp"
 )
 
-const healthCheckTimeout = time.Second
-
-type redisPingFunc func(ctx context.Context) error
 type requestServingCheckFunc func() bool
 
 type healthDependency struct {
@@ -24,18 +18,16 @@ type healthResponse struct {
 	Dependencies map[string]healthDependency `json:"dependencies"`
 }
 
-// NewHealthHandler reports service health and dependency state.
-func NewHealthHandler(redisPing redisPingFunc, requestServingCheck requestServingCheckFunc) fasthttp.RequestHandler {
+// NewHealthHandler reports whether the request-serving path is ready.
+func NewHealthHandler(requestServingCheck requestServingCheckFunc) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.SetContentType("application/json")
 
 		serving := isRequestServing(requestServingCheck)
-		redisErr := checkRedis(redisPing)
 
 		response := healthResponse{
 			Dependencies: map[string]healthDependency{
 				"request_path": {Status: "up"},
-				"redis":        {Status: "up"},
 			},
 		}
 		if !serving {
@@ -44,21 +36,11 @@ func NewHealthHandler(redisPing redisPingFunc, requestServingCheck requestServin
 				Error:  "request path is not ready",
 			}
 		}
-		if redisErr != nil {
-			response.Dependencies["redis"] = healthDependency{
-				Status: "down",
-				Error:  redisErr.Error(),
-			}
-		}
-
 		statusCode := fasthttp.StatusOK
-		switch {
-		case !serving:
+		if !serving {
 			response.Status = "unhealthy"
 			statusCode = fasthttp.StatusServiceUnavailable
-		case redisErr != nil:
-			response.Status = "degraded"
-		default:
+		} else {
 			response.Status = "healthy"
 		}
 
@@ -72,18 +54,4 @@ func isRequestServing(check requestServingCheckFunc) bool {
 		return true
 	}
 	return check()
-}
-
-func checkRedis(ping redisPingFunc) error {
-	if ping == nil {
-		return errors.New("redis health check is not configured")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
-	defer cancel()
-
-	if err := ping(ctx); err != nil {
-		return err
-	}
-	return nil
 }

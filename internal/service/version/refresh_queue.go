@@ -7,9 +7,8 @@ import (
 
 const defaultRefreshQueueSize = 256
 
-// RefreshJob is a queued refresh request with scheduler-assigned job ID.
+// RefreshJob is a queued refresh request.
 type RefreshJob struct {
-	ID  uint64
 	Key string
 }
 

@@ -39,6 +39,15 @@ func TestParseHTTPSURL(t *testing.T) {
 			wantErr: ErrURLUserinfoNotAllowed,
 		},
 		{
+			name:    "nonstandard port rejected",
+			rawURL:  "https://api.github.com:8443/releases/latest",
+			wantErr: ErrHTTPSPortOnly,
+		},
+		{
+			name:   "explicit https port accepted",
+			rawURL: "https://api.github.com:443/releases/latest",
+		},
+		{
 			name:   "https accepted",
 			rawURL: "https://api.github.com/repos/org/repo/releases/latest",
 		},

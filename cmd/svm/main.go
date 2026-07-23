@@ -10,20 +10,19 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	appcore "svm/internal/app"
 	"svm/internal/cache"
 	"svm/internal/cache/l1"
-	"svm/internal/cache/l2redis"
 	"svm/internal/config"
 	"svm/internal/httpapi"
 	"svm/internal/observability"
 	versionservice "svm/internal/service/version"
 	upstreamgithub "svm/internal/upstream/github"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
 )
 
@@ -51,12 +50,6 @@ type refreshByKeyHandler interface {
 type hitRecorderRuntime interface {
 	RecordActivity(key string, hitAt time.Time) bool
 	ActiveKeysSince(ctx context.Context, since time.Time, limit int) ([]string, error)
-	Close()
-}
-
-type writeBehindRuntime interface {
-	Enqueue(key string, record cache.Record) bool
-	CloseWithDrain(timeout time.Duration)
 }
 
 type refreshQueueRuntime interface {
@@ -80,7 +73,6 @@ type gracefulShutdownServer interface {
 
 // App holds the application state
 type App struct {
-	redisClient         *redis.Client
 	tokenProvider       upstreamgithub.TokenProvider
 	port                string
 	logger              *observability.Logger
@@ -90,11 +82,11 @@ type App struct {
 	trustedNetworks     []*net.IPNet
 	requestLogQueue     chan requestLogEntry
 	requestLogDone      chan struct{}
+	requestLogMu        sync.RWMutex
 	upstreamClient      *upstreamgithub.Client
 	versionService      versionServiceHandler
 	cacheStore          versionservice.CacheStore
 	hitRecorder         hitRecorderRuntime
-	writeBehind         writeBehindRuntime
 	refreshQueue        refreshQueueRuntime
 	revalidateScheduler revalidateSchedulerRuntime
 	refreshWorkers      refreshWorkersRuntime
@@ -155,67 +147,18 @@ func NewApp() (*App, error) {
 		}
 	}
 
-	app.redisClient, err = l2redis.NewClient(context.Background(), cfg.RedisHost)
-	if err != nil {
-		return nil, err
-	}
-	l2Store := l2redis.NewStore(app.redisClient)
-	app.hitRecorder = versionservice.NewHitRecorder(
-		l2Store,
-		cfg.CachePolicy.WriteBehindQueueSize,
-		app.getLogger(),
-	)
-	app.writeBehind = versionservice.NewWriteBehind(
-		l2Store,
-		cfg.CachePolicy.WriteBehindQueueSize,
-		cfg.CachePolicy.WriteBehindFlushInterval,
-		cfg.CachePolicy.WriteBehindRetryMaxInterval,
-		cfg.CachePolicy.WriteBehindRetryMaxAge,
-		app.getLogger(),
-	)
-	app.cacheStore = cache.NewFacade(
-		l1.NewCacheWithMaxGB(cfg.CachePolicy.L1MaxGB),
-		l2Store,
-		app.writeBehind,
-	)
+	app.hitRecorder = versionservice.NewActivityTracker()
+	app.cacheStore = l1.NewStore(l1.NewCacheWithMaxGB(cfg.CachePolicy.L1MaxGB))
 	app.versionService = app.newVersionService()
 	app.startRevalidationRuntime()
 
-	go app.processRequestLogs()
+	go app.processRequestLogs(app.requestLogQueue, app.requestLogDone)
 
 	return app, nil
 }
 
-type cacheAdapter struct {
-	app *App
-}
-
-func (a cacheAdapter) Get(ctx context.Context, key string) (cache.Record, bool, error) {
-	if a.app == nil || a.app.cacheStore == nil {
-		return cache.Record{}, false, nil
-	}
-
-	return a.app.cacheStore.Get(ctx, key)
-}
-
-func (a cacheAdapter) Set(key string, record cache.Record) (bool, error) {
-	if a.app == nil || a.app.cacheStore == nil {
-		return false, nil
-	}
-
-	return a.app.cacheStore.Set(key, record)
-}
-
 func (app *App) canServeRequests() bool {
 	return app != nil && app.upstreamClient != nil && app.tokenProvider != nil
-}
-
-func (app *App) pingRedis(ctx context.Context) error {
-	if app == nil || app.redisClient == nil {
-		return errors.New("redis client is not configured")
-	}
-
-	return app.redisClient.Ping(ctx).Err()
 }
 
 func (app *App) getLogger() *observability.Logger {
@@ -228,7 +171,7 @@ func (app *App) getLogger() *observability.Logger {
 
 func (app *App) newVersionService() versionServiceHandler {
 	service := versionservice.NewService(
-		cacheAdapter{app: app},
+		app.cacheStore,
 		app.hitRecorder,
 		app.tokenProvider,
 		app.upstreamClient,
@@ -250,17 +193,15 @@ func (app *App) startRevalidationRuntime() {
 		return
 	}
 
-	app.refreshQueue = versionservice.NewRefreshQueue(app.cachePolicy.WriteBehindQueueSize)
-	jobTracker := versionservice.NewRefreshJobTracker()
+	app.refreshQueue = versionservice.NewRefreshQueue(app.cachePolicy.RefreshQueueSize)
 	workers := versionservice.NewRefreshWorkers(
 		app.refreshQueue,
 		refresher,
-		1,
+		app.cachePolicy.RevalidateWorkers,
 		app.cachePolicy.RevalidatePerWorkerRPS,
 		app.getLogger(),
 	)
 	workers.SetMetrics(app.metrics)
-	workers.SetJobTracker(jobTracker)
 	app.refreshWorkers = workers
 
 	scheduler := versionservice.NewRevalidateScheduler(
@@ -270,9 +211,7 @@ func (app *App) startRevalidationRuntime() {
 		app.cachePolicy,
 		app.getLogger(),
 	)
-	scheduler.SetWorkerScaler(workers)
 	scheduler.SetMetrics(app.metrics)
-	scheduler.SetJobTracker(jobTracker)
 	app.revalidateScheduler = scheduler
 }
 
@@ -326,7 +265,10 @@ func (app *App) getClientIP(ctx *fasthttp.RequestCtx) string {
 }
 
 func (app *App) enqueueClientRequestLog(ctx *fasthttp.RequestCtx) {
-	if app.requestLogQueue == nil {
+	app.requestLogMu.RLock()
+	defer app.requestLogMu.RUnlock()
+	queue := app.requestLogQueue
+	if queue == nil {
 		return
 	}
 
@@ -350,19 +292,20 @@ func (app *App) enqueueClientRequestLog(ctx *fasthttp.RequestCtx) {
 	}
 
 	select {
-	case app.requestLogQueue <- entry:
+	case queue <- entry:
 	default:
+		app.metrics.IncAccessLogDropped()
 	}
 }
 
-func (app *App) processRequestLogs() {
-	if app.requestLogDone != nil {
-		defer close(app.requestLogDone)
+func (app *App) processRequestLogs(queue <-chan requestLogEntry, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
 	}
 
 	logger := app.getLogger()
 
-	for entry := range app.requestLogQueue {
+	for entry := range queue {
 		fields := []observability.Field{
 			observability.String("client_ip", entry.clientIP),
 			observability.String("method", entry.method),
@@ -393,10 +336,10 @@ func sanitizedUpstreamURLForAccessLog(ctx *fasthttp.RequestCtx) string {
 	return parsed.String()
 }
 
-func (app *App) shutdownDrainTimeout() time.Duration {
-	timeout := cache.DefaultPolicy().ShutdownDrainTimeout
-	if app != nil && app.cachePolicy.ShutdownDrainTimeout > 0 {
-		timeout = app.cachePolicy.ShutdownDrainTimeout
+func (app *App) shutdownTimeout() time.Duration {
+	timeout := cache.DefaultPolicy().ShutdownTimeout
+	if app != nil && app.cachePolicy.ShutdownTimeout > 0 {
+		timeout = app.cachePolicy.ShutdownTimeout
 	}
 
 	return timeout
@@ -414,7 +357,6 @@ func (app *App) shutdownBackground(timeout time.Duration) {
 			app.revalidateScheduler,
 			app.refreshWorkers,
 			app.refreshQueue,
-			app.hitRecorder,
 		)
 		close(closed)
 	}()
@@ -427,24 +369,22 @@ func (app *App) shutdownBackground(timeout time.Duration) {
 			app.getLogger().Warn("background worker shutdown timed out")
 		}
 	}
-	appcore.DrainOnShutdown(max(time.Until(deadline), time.Nanosecond), app.writeBehind)
 	app.shutdownRequestLogs(max(time.Until(deadline), time.Nanosecond))
-
-	if app.redisClient != nil {
-		if err := app.redisClient.Close(); err != nil {
-			app.getLogger().Warn("failed to close redis client", observability.String("error", err.Error()))
-		}
-		app.redisClient = nil
-	}
 }
 
 func (app *App) shutdownRequestLogs(timeout time.Duration) {
-	if app == nil || app.requestLogQueue == nil {
+	if app == nil {
 		return
 	}
 
+	app.requestLogMu.Lock()
+	if app.requestLogQueue == nil {
+		app.requestLogMu.Unlock()
+		return
+	}
 	close(app.requestLogQueue)
 	app.requestLogQueue = nil
+	app.requestLogMu.Unlock()
 
 	done := app.requestLogDone
 	if done == nil {
@@ -472,7 +412,7 @@ func (app *App) shutdown(server gracefulShutdownServer) error {
 		return nil
 	}
 
-	timeout := app.shutdownDrainTimeout()
+	timeout := app.shutdownTimeout()
 	deadline := time.Now().Add(timeout)
 	var serverErr error
 
@@ -564,7 +504,7 @@ func main() {
 		httpapi.NewRouter(
 			application.versionHandler,
 			application.pingHandler,
-			httpapi.NewHealthHandler(application.pingRedis, application.canServeRequests),
+			httpapi.NewHealthHandler(application.canServeRequests),
 			httpapi.NewMetricsHandler(application.metrics),
 		),
 		application.enqueueClientRequestLog,

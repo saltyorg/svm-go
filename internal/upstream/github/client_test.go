@@ -3,11 +3,18 @@ package github
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
@@ -108,7 +115,7 @@ func TestClientObserveRateLimitIgnoresNonRateLimitedStatuses(t *testing.T) {
 	}
 }
 
-func TestClientGetSetsAuthorizationAndIfNoneMatch(t *testing.T) {
+func TestClientGetDoesNotSendAuthorizationToUntrustedHost(t *testing.T) {
 	t.Parallel()
 
 	var gotAuthorization string
@@ -119,14 +126,14 @@ func TestClientGetSetsAuthorizationAndIfNoneMatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := NewClientWithHTTPClient(server.Client())
 	_, err := client.Get(context.Background(), server.URL, "token-a", `"etag-1"`)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 
-	if gotAuthorization != "token token-a" {
-		t.Fatalf("expected authorization header %q, got %q", "token token-a", gotAuthorization)
+	if gotAuthorization != "" {
+		t.Fatalf("expected authorization header to be omitted, got %q", gotAuthorization)
 	}
 	if gotIfNoneMatch != `"etag-1"` {
 		t.Fatalf("expected If-None-Match header %q, got %q", `"etag-1"`, gotIfNoneMatch)
@@ -142,12 +149,79 @@ func TestClientGetOmitsIfNoneMatchWhenETagEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient()
+	client := NewClientWithHTTPClient(server.Client())
 	_, err := client.Get(context.Background(), server.URL, "token-a", "")
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 	if gotIfNoneMatch != "" {
 		t.Fatalf("expected empty If-None-Match header, got %q", gotIfNoneMatch)
+	}
+}
+
+func TestShouldAuthenticateOnlyGitHubAPIHost(t *testing.T) {
+	t.Parallel()
+
+	if !shouldAuthenticate(mustParseURL(t, "https://api.github.com/repos/org/repo")) {
+		t.Fatal("expected GitHub API host to receive authentication")
+	}
+	if shouldAuthenticate(mustParseURL(t, "https://raw.githubusercontent.com/org/repo/main/file")) {
+		t.Fatal("expected content host not to receive authentication")
+	}
+	if shouldAuthenticate(mustParseURL(t, "https://example.com")) {
+		t.Fatal("expected custom host not to receive authentication")
+	}
+}
+
+func TestClientSendsAuthorizationToGitHubAPI(t *testing.T) {
+	t.Parallel()
+
+	var authorization string
+	client := NewClientWithHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			authorization = request.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+			}, nil
+		}),
+	})
+	response, err := client.Get(
+		context.Background(),
+		"https://api.github.com/repos/org/repo",
+		"token-a",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	_ = response.Body.Close()
+	if authorization != "token token-a" {
+		t.Fatalf("expected GitHub authorization header, got %q", authorization)
+	}
+}
+
+func TestIsPublicIPRejectsPrivateAndSpecialAddresses(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"100.64.0.1",
+		"169.254.1.1",
+		"192.0.2.1",
+		"198.51.100.1",
+		"203.0.113.1",
+		"::1",
+		"fc00::1",
+		"2001:db8::1",
+	} {
+		if isPublicIP(net.ParseIP(raw)) {
+			t.Fatalf("expected %s to be rejected", raw)
+		}
+	}
+	if !isPublicIP(net.ParseIP("8.8.8.8")) {
+		t.Fatal("expected public address to be allowed")
 	}
 }

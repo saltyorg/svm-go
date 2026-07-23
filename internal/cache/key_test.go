@@ -34,7 +34,7 @@ func TestNormalizeURLDefaultsPath(t *testing.T) {
 	}
 }
 
-func TestKeyFromURLIsDeterministicAndRedisSafe(t *testing.T) {
+func TestKeyFromURLIsDeterministicAndStorageSafe(t *testing.T) {
 	t.Parallel()
 
 	first, err := KeyFromURL("https://api.github.com/repos/acme/widgets/releases/latest?a=1&b=2")
@@ -51,9 +51,9 @@ func TestKeyFromURLIsDeterministicAndRedisSafe(t *testing.T) {
 		t.Fatalf("expected stable key for equivalent URL, got %q and %q", first, second)
 	}
 
-	redisSafe := regexp.MustCompile(`^[a-z0-9:]+$`)
-	if !redisSafe.MatchString(first) {
-		t.Fatalf("expected redis-safe cache key format, got %q", first)
+	storageSafe := regexp.MustCompile(`^[a-z0-9:]+$`)
+	if !storageSafe.MatchString(first) {
+		t.Fatalf("expected storage-safe cache key format, got %q", first)
 	}
 }
 

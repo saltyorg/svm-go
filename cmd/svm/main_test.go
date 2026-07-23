@@ -152,6 +152,42 @@ func TestSanitizedUpstreamURLForAccessLogSkipsOtherRoutes(t *testing.T) {
 	}
 }
 
+func TestAccessLogQueueDropIsCounted(t *testing.T) {
+	t.Parallel()
+
+	metrics := observability.NewMetrics()
+	application := &App{
+		metrics:         metrics,
+		requestLogQueue: make(chan requestLogEntry, 1),
+	}
+	application.requestLogQueue <- requestLogEntry{}
+	application.enqueueClientRequestLog(newRequestCtx(fasthttp.MethodGet, "/ping"))
+
+	if got := metrics.Snapshot().AccessLogDropped; got != 1 {
+		t.Fatalf("expected one dropped access log, got %d", got)
+	}
+}
+
+func TestAccessLogEnqueueAndShutdownAreSynchronized(t *testing.T) {
+	t.Parallel()
+
+	application := &App{
+		metrics:         observability.NewMetrics(),
+		requestLogQueue: make(chan requestLogEntry, 128),
+		requestLogDone:  make(chan struct{}),
+	}
+	go application.processRequestLogs(application.requestLogQueue, application.requestLogDone)
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			application.enqueueClientRequestLog(newRequestCtx(fasthttp.MethodGet, "/ping"))
+		})
+	}
+	application.shutdownRequestLogs(time.Second)
+	wg.Wait()
+}
+
 func TestVersionHandlerParsesRefreshQueryOverride(t *testing.T) {
 	t.Parallel()
 
@@ -310,25 +346,13 @@ func (f *fakeRuntimeCacheStore) Set(_ string, _ cache.Record) (bool, error) {
 	return true, nil
 }
 
-type fakeActiveKeyIndex struct {
-	keys []string
-}
-
-func (f *fakeActiveKeyIndex) UpsertActiveKey(_ context.Context, _ string, _ time.Time) error {
-	return nil
-}
-
-func (f *fakeActiveKeyIndex) ActiveKeysSince(_ context.Context, _ time.Time, _ int) ([]string, error) {
-	return append([]string(nil), f.keys...), nil
-}
-
 func TestStartRevalidationRuntimeWiresSchedulerQueueAndWorkers(t *testing.T) {
 	t.Parallel()
 
 	policy := cache.DefaultPolicy()
 	policy.RevalidateInterval = time.Minute
 	policy.RevalidatePerWorkerRPS = 1000
-	policy.WriteBehindQueueSize = 8
+	policy.RefreshQueueSize = 8
 
 	refresher := &fakeRefreshCapableService{}
 	cacheStore := &fakeRuntimeCacheStore{
@@ -338,10 +362,8 @@ func TestStartRevalidationRuntimeWiresSchedulerQueueAndWorkers(t *testing.T) {
 			URL:           "https://api.github.com/repos/hashicorp/terraform/releases/latest",
 		},
 	}
-	hitRecorder := versionservice.NewHitRecorder(&fakeActiveKeyIndex{
-		keys: []string{"cache:v1:refresh-key"},
-	}, 8, nil)
-	defer hitRecorder.Close()
+	hitRecorder := versionservice.NewActivityTracker()
+	hitRecorder.RecordActivity("cache:v1:refresh-key", time.Now())
 
 	application := &App{
 		cachePolicy:    policy,
@@ -387,8 +409,7 @@ func TestStartRevalidationRuntimeSkipsWhenServiceDoesNotSupportRefreshByKey(t *t
 	t.Parallel()
 
 	policy := cache.DefaultPolicy()
-	hitRecorder := versionservice.NewHitRecorder(&fakeActiveKeyIndex{}, 4, nil)
-	defer hitRecorder.Close()
+	hitRecorder := versionservice.NewActivityTracker()
 
 	application := &App{
 		cachePolicy:    policy,
@@ -413,24 +434,20 @@ func TestStartRevalidationRuntimeSkipsWhenServiceDoesNotSupportRefreshByKey(t *t
 func TestShutdownBackgroundClosesRuntimeComponents(t *testing.T) {
 	t.Parallel()
 
-	drainer := &fakeWriteBehindRuntime{}
-	hitRecorder := &fakeHitRecorderRuntime{}
 	scheduler := &fakeSchedulerRuntime{}
 	workers := &fakeWorkersRuntime{}
 	queue := &fakeQueueRuntime{}
 
 	application := &App{
 		cachePolicy: cache.Policy{
-			ShutdownDrainTimeout: 75 * time.Millisecond,
+			ShutdownTimeout: 75 * time.Millisecond,
 		},
-		hitRecorder:         hitRecorder,
-		writeBehind:         drainer,
 		refreshQueue:        queue,
 		revalidateScheduler: scheduler,
 		refreshWorkers:      workers,
 	}
 
-	application.shutdownBackground(application.shutdownDrainTimeout())
+	application.shutdownBackground(application.shutdownTimeout())
 
 	if scheduler.closeCalls != 1 {
 		t.Fatalf("expected scheduler close once, got %d", scheduler.closeCalls)
@@ -441,15 +458,6 @@ func TestShutdownBackgroundClosesRuntimeComponents(t *testing.T) {
 	if queue.closeCalls != 1 {
 		t.Fatalf("expected queue close once, got %d", queue.closeCalls)
 	}
-	if hitRecorder.closeCalls != 1 {
-		t.Fatalf("expected hit recorder close once, got %d", hitRecorder.closeCalls)
-	}
-	if drainer.closeWithDrainCalls != 1 {
-		t.Fatalf("expected write-behind drain once, got %d", drainer.closeWithDrainCalls)
-	}
-	if drainer.lastTimeout <= 0 || drainer.lastTimeout > 75*time.Millisecond {
-		t.Fatalf("expected a positive drain timeout within 75ms, got %s", drainer.lastTimeout)
-	}
 }
 
 func TestRunServerWithLifecycleHandlesSignalAndTriggersShutdownSequence(t *testing.T) {
@@ -458,17 +466,13 @@ func TestRunServerWithLifecycleHandlesSignalAndTriggersShutdownSequence(t *testi
 	server := &fakeGracefulShutdownServer{
 		shutdownStarted: make(chan struct{}, 1),
 	}
-	drainer := &fakeWriteBehindRuntime{}
-	hitRecorder := &fakeHitRecorderRuntime{}
 	scheduler := &fakeSchedulerRuntime{}
 	workers := &fakeWorkersRuntime{}
 	queue := &fakeQueueRuntime{}
 	application := &App{
 		cachePolicy: cache.Policy{
-			ShutdownDrainTimeout: 120 * time.Millisecond,
+			ShutdownTimeout: 120 * time.Millisecond,
 		},
-		hitRecorder:         hitRecorder,
-		writeBehind:         drainer,
 		refreshQueue:        queue,
 		revalidateScheduler: scheduler,
 		refreshWorkers:      workers,
@@ -514,31 +518,18 @@ func TestRunServerWithLifecycleHandlesSignalAndTriggersShutdownSequence(t *testi
 	if queue.closeCalls != 1 {
 		t.Fatalf("expected queue close once, got %d", queue.closeCalls)
 	}
-	if hitRecorder.closeCalls != 1 {
-		t.Fatalf("expected hit recorder close once, got %d", hitRecorder.closeCalls)
-	}
-	if drainer.closeWithDrainCalls != 1 {
-		t.Fatalf("expected write-behind drain once, got %d", drainer.closeWithDrainCalls)
-	}
-	if drainer.lastTimeout <= 0 || drainer.lastTimeout > 120*time.Millisecond {
-		t.Fatalf("expected a positive drain timeout within 120ms, got %s", drainer.lastTimeout)
-	}
 }
 
 func TestRunServerWithLifecycleClosesRuntimeWhenListenFails(t *testing.T) {
 	t.Parallel()
 
-	drainer := &fakeWriteBehindRuntime{}
-	hitRecorder := &fakeHitRecorderRuntime{}
 	scheduler := &fakeSchedulerRuntime{}
 	workers := &fakeWorkersRuntime{}
 	queue := &fakeQueueRuntime{}
 	application := &App{
 		cachePolicy: cache.Policy{
-			ShutdownDrainTimeout: 90 * time.Millisecond,
+			ShutdownTimeout: 90 * time.Millisecond,
 		},
-		hitRecorder:         hitRecorder,
-		writeBehind:         drainer,
 		refreshQueue:        queue,
 		revalidateScheduler: scheduler,
 		refreshWorkers:      workers,
@@ -566,48 +557,6 @@ func TestRunServerWithLifecycleClosesRuntimeWhenListenFails(t *testing.T) {
 	if queue.closeCalls != 1 {
 		t.Fatalf("expected queue close once, got %d", queue.closeCalls)
 	}
-	if hitRecorder.closeCalls != 1 {
-		t.Fatalf("expected hit recorder close once, got %d", hitRecorder.closeCalls)
-	}
-	if drainer.closeWithDrainCalls != 1 {
-		t.Fatalf("expected write-behind drain once, got %d", drainer.closeWithDrainCalls)
-	}
-}
-
-type fakeWriteBehindRuntime struct {
-	mu                  sync.Mutex
-	closeWithDrainCalls int
-	lastTimeout         time.Duration
-}
-
-func (f *fakeWriteBehindRuntime) Enqueue(string, cache.Record) bool {
-	return true
-}
-
-func (f *fakeWriteBehindRuntime) CloseWithDrain(timeout time.Duration) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closeWithDrainCalls++
-	f.lastTimeout = timeout
-}
-
-type fakeHitRecorderRuntime struct {
-	mu         sync.Mutex
-	closeCalls int
-}
-
-func (f *fakeHitRecorderRuntime) RecordActivity(string, time.Time) bool {
-	return true
-}
-
-func (f *fakeHitRecorderRuntime) ActiveKeysSince(context.Context, time.Time, int) ([]string, error) {
-	return nil, nil
-}
-
-func (f *fakeHitRecorderRuntime) Close() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closeCalls++
 }
 
 type fakeSchedulerRuntime struct {

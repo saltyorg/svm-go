@@ -29,9 +29,7 @@ type RefreshWorkers struct {
 	now                func() time.Time
 	minInterval        time.Duration
 	initialWorkerCount int
-	countUpdates       chan int
 	metrics            atomic.Pointer[observability.Metrics]
-	jobTracker         atomic.Pointer[RefreshJobTracker]
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -92,7 +90,6 @@ func newRefreshWorkers(
 		now:                now,
 		minInterval:        minInterval,
 		initialWorkerCount: workerCount,
-		countUpdates:       make(chan int, 1),
 		done:               make(chan struct{}),
 	}
 
@@ -108,42 +105,12 @@ func newRefreshWorkers(
 	return workers
 }
 
-// SetWorkerCount updates the number of active refresh workers.
-func (w *RefreshWorkers) SetWorkerCount(workerCount int) {
-	if w == nil || w.countUpdates == nil {
-		return
-	}
-
-	workerCount = normalizeWorkerCount(workerCount)
-
-	select {
-	case w.countUpdates <- workerCount:
-	default:
-		select {
-		case <-w.countUpdates:
-		default:
-		}
-		select {
-		case w.countUpdates <- workerCount:
-		default:
-		}
-	}
-}
-
 // SetMetrics attaches optional runtime metrics counters.
 func (w *RefreshWorkers) SetMetrics(metrics *observability.Metrics) {
 	if w == nil {
 		return
 	}
 	w.metrics.Store(metrics)
-}
-
-// SetJobTracker attaches optional per-job completion tracking.
-func (w *RefreshWorkers) SetJobTracker(tracker *RefreshJobTracker) {
-	if w == nil {
-		return
-	}
-	w.jobTracker.Store(tracker)
 }
 
 // Close stops all refresh workers.
@@ -165,49 +132,13 @@ func (w *RefreshWorkers) run(ctx context.Context) {
 
 	var wg sync.WaitGroup
 
-	workerCancels := make([]context.CancelFunc, 0, w.initialWorkerCount)
-	spawnWorker := func() {
-		workerCtx, workerCancel := context.WithCancel(ctx)
-		workerCancels = append(workerCancels, workerCancel)
+	for range w.initialWorkerCount {
 		wg.Go(func() {
-			w.runWorker(workerCtx)
+			w.runWorker(ctx)
 		})
 	}
-	stopWorker := func() bool {
-		if len(workerCancels) == 0 {
-			return false
-		}
-		last := len(workerCancels) - 1
-		cancel := workerCancels[last]
-		workerCancels = workerCancels[:last]
-		cancel()
-		return true
-	}
-	scaleTo := func(workerCount int) {
-		target := normalizeWorkerCount(workerCount)
-		for len(workerCancels) < target {
-			spawnWorker()
-		}
-		for len(workerCancels) > target {
-			if !stopWorker() {
-				return
-			}
-		}
-	}
-
-	scaleTo(w.initialWorkerCount)
-
-	for {
-		select {
-		case <-ctx.Done():
-			for stopWorker() {
-			}
-			wg.Wait()
-			return
-		case workerCount := <-w.countUpdates:
-			scaleTo(workerCount)
-		}
-	}
+	<-ctx.Done()
+	wg.Wait()
 }
 
 func normalizeWorkerCount(workerCount int) int {
@@ -243,9 +174,6 @@ func (w *RefreshWorkers) runWorker(ctx context.Context) {
 		_ = w.refresher.RefreshByKey(key)
 		if metrics := w.metrics.Load(); metrics != nil {
 			metrics.IncRefreshProcessed()
-		}
-		if tracker := w.jobTracker.Load(); tracker != nil && job.ID != 0 {
-			tracker.Complete(job.ID)
 		}
 		lastRunAt = w.now()
 	}

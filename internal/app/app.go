@@ -12,11 +12,6 @@ const (
 	defaultIdleTimeout  = 60 * time.Second
 )
 
-// ShutdownDrainer defines bounded shutdown drain behavior for background workers.
-type ShutdownDrainer interface {
-	CloseWithDrain(timeout time.Duration)
-}
-
 // ShutdownCloser defines close behavior for components that don't support drains.
 type ShutdownCloser interface {
 	Close()
@@ -35,20 +30,6 @@ func NewServer(handler fasthttp.RequestHandler) *fasthttp.Server {
 // ListenAndServe starts the server instance.
 func ListenAndServe(server *fasthttp.Server, addr string) error {
 	return server.ListenAndServe(addr)
-}
-
-// DrainOnShutdown invokes drainer shutdown hooks with a shared timeout budget.
-func DrainOnShutdown(timeout time.Duration, drainers ...ShutdownDrainer) {
-	if timeout <= 0 {
-		return
-	}
-
-	for _, drainer := range drainers {
-		if drainer == nil {
-			continue
-		}
-		drainer.CloseWithDrain(timeout)
-	}
 }
 
 // CloseOnShutdown invokes close hooks for background workers.

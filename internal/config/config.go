@@ -27,7 +27,6 @@ var defaultAllowedUpstreamHosts = []string{
 type Config struct {
 	GitHubPATs           []string
 	APIUsageThreshold    int
-	RedisHost            string
 	ForwardedAllowIPs    string
 	AllowedUpstreamHosts []string
 	CachePolicy          cache.Policy
@@ -38,20 +37,25 @@ type Config struct {
 func Load() (Config, error) {
 	cfg := Config{}
 
-	requiredVars := []string{"GITHUB_PATS", "API_USAGE_THRESHOLD", "REDIS_HOST"}
+	requiredVars := []string{"GITHUB_PATS", "API_USAGE_THRESHOLD"}
 	for _, variable := range requiredVars {
 		if os.Getenv(variable) == "" {
 			return Config{}, fmt.Errorf("%s not set in environment variables", variable)
 		}
 	}
 
-	cfg.GitHubPATs = strings.Split(os.Getenv("GITHUB_PATS"), ",")
-	threshold, err := strconv.Atoi(os.Getenv("API_USAGE_THRESHOLD"))
+	cfg.GitHubPATs = parseCSVTrimDeduplicated(os.Getenv("GITHUB_PATS"))
+	if len(cfg.GitHubPATs) == 0 {
+		return Config{}, fmt.Errorf("GITHUB_PATS must contain at least one token")
+	}
+	threshold, err := strconv.Atoi(strings.TrimSpace(os.Getenv("API_USAGE_THRESHOLD")))
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid API_USAGE_THRESHOLD: %v", err)
 	}
+	if threshold < 0 {
+		return Config{}, fmt.Errorf("API_USAGE_THRESHOLD must be zero or greater")
+	}
 	cfg.APIUsageThreshold = threshold
-	cfg.RedisHost = os.Getenv("REDIS_HOST")
 	cfg.ForwardedAllowIPs = os.Getenv("FORWARDED_ALLOW_IPS")
 	cfg.AllowedUpstreamHosts = loadAllowedUpstreamHosts()
 	if len(cfg.AllowedUpstreamHosts) == 0 {
@@ -61,9 +65,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.Port = os.Getenv("PORT")
+	cfg.Port = strings.TrimSpace(os.Getenv("PORT"))
 	if cfg.Port == "" {
 		cfg.Port = defaultPort
+	}
+	if err := validatePort(cfg.Port); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil
@@ -93,6 +100,32 @@ func parseCSVLowerTrim(value string) []string {
 	return out
 }
 
+func parseCSVTrimDeduplicated(value string) []string {
+	parts := strings.Split(value, ",")
+	seen := make(map[string]struct{}, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		token := strings.TrimSpace(part)
+		if token == "" {
+			continue
+		}
+		if _, exists := seen[token]; exists {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
+func validatePort(raw string) error {
+	port, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 16)
+	if err != nil || port == 0 {
+		return fmt.Errorf("PORT must be an integer between 1 and 65535")
+	}
+	return nil
+}
+
 func loadCachePolicy() (cache.Policy, error) {
 	policy := cache.DefaultPolicy()
 	var err error
@@ -117,10 +150,7 @@ func loadCachePolicy() (cache.Policy, error) {
 		return cache.Policy{}, err
 	}
 
-	policy.RevalidateEndpointsPerWorker, err = parseEnvPositiveInt(
-		"REVALIDATE_ENDPOINTS_PER_WORKER",
-		policy.RevalidateEndpointsPerWorker,
-	)
+	policy.RevalidateWorkers, err = parseEnvPositiveInt("REVALIDATE_WORKERS", policy.RevalidateWorkers)
 	if err != nil {
 		return cache.Policy{}, err
 	}
@@ -133,31 +163,7 @@ func loadCachePolicy() (cache.Policy, error) {
 		return cache.Policy{}, err
 	}
 
-	policy.WriteBehindQueueSize, err = parseEnvPositiveInt("WRITE_BEHIND_QUEUE_SIZE", policy.WriteBehindQueueSize)
-	if err != nil {
-		return cache.Policy{}, err
-	}
-
-	policy.WriteBehindFlushInterval, err = parseEnvDuration(
-		"WRITE_BEHIND_FLUSH_INTERVAL",
-		policy.WriteBehindFlushInterval,
-	)
-	if err != nil {
-		return cache.Policy{}, err
-	}
-
-	policy.WriteBehindRetryMaxInterval, err = parseEnvDuration(
-		"WRITE_BEHIND_RETRY_MAX_INTERVAL",
-		policy.WriteBehindRetryMaxInterval,
-	)
-	if err != nil {
-		return cache.Policy{}, err
-	}
-
-	policy.WriteBehindRetryMaxAge, err = parseEnvDuration(
-		"WRITE_BEHIND_RETRY_MAX_AGE",
-		policy.WriteBehindRetryMaxAge,
-	)
+	policy.RefreshQueueSize, err = parseEnvPositiveInt("REFRESH_QUEUE_SIZE", policy.RefreshQueueSize)
 	if err != nil {
 		return cache.Policy{}, err
 	}
@@ -175,7 +181,7 @@ func loadCachePolicy() (cache.Policy, error) {
 		return cache.Policy{}, err
 	}
 
-	policy.ShutdownDrainTimeout, err = parseEnvDuration("SHUTDOWN_DRAIN_TIMEOUT", policy.ShutdownDrainTimeout)
+	policy.ShutdownTimeout, err = parseEnvDuration("SHUTDOWN_TIMEOUT", policy.ShutdownTimeout)
 	if err != nil {
 		return cache.Policy{}, err
 	}

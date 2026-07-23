@@ -3,7 +3,6 @@ package version
 import (
 	"context"
 	"io"
-	"sync/atomic"
 	"time"
 
 	"svm/internal/cache"
@@ -22,10 +21,6 @@ type refreshEnqueuer interface {
 	Enqueue(job RefreshJob) bool
 }
 
-type refreshWorkerScaler interface {
-	SetWorkerCount(workerCount int)
-}
-
 // RevalidateSweepResult captures one scheduler sweep result.
 type RevalidateSweepResult struct {
 	CandidateKeys int
@@ -34,7 +29,6 @@ type RevalidateSweepResult struct {
 	WorkerCount   int
 	Enqueued      int
 	Dropped       int
-	SweepJobID    uint64
 }
 
 // RevalidateScheduler periodically selects due active keys and enqueues refresh work.
@@ -47,16 +41,6 @@ type RevalidateScheduler struct {
 	metrics    *observability.Metrics
 	now        func() time.Time
 	interval   time.Duration
-	scaler     refreshWorkerScaler
-	jobTracker *RefreshJobTracker
-
-	lastUpstreamRequests atomic.Uint64
-	lastUpstreamErrors   atomic.Uint64
-	lastRefreshUpdated   atomic.Uint64
-	lastRefreshNotMod    atomic.Uint64
-	lastRefreshSkipped   atomic.Uint64
-	lastRefreshFailed    atomic.Uint64
-	nextSweepJobID       atomic.Uint64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -99,8 +83,8 @@ func newRevalidateScheduler(
 	if policy.RevalidateLookback <= 0 {
 		policy.RevalidateLookback = defaults.RevalidateLookback
 	}
-	if policy.RevalidateEndpointsPerWorker <= 0 {
-		policy.RevalidateEndpointsPerWorker = defaults.RevalidateEndpointsPerWorker
+	if policy.RevalidateWorkers <= 0 {
+		policy.RevalidateWorkers = defaults.RevalidateWorkers
 	}
 	if logger == nil {
 		logger = observability.NewLogger(io.Discard)
@@ -198,42 +182,15 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 	}
 
 	result.DueKeys = len(dueKeys)
-	if s.jobTracker != nil && len(dueKeys) > 0 {
-		result.SweepJobID = s.nextSweepJobID.Add(1)
-		s.jobTracker.Start(result.SweepJobID, len(dueKeys))
-	}
-	result.WorkerCount = workerCountForDueEndpoints(len(dueKeys), s.policy.RevalidateEndpointsPerWorker)
-	if s.scaler != nil {
-		s.scaler.SetWorkerCount(result.WorkerCount)
-	}
-
-	for _, batch := range partitionRefreshKeys(dueKeys, s.policy.RevalidateEndpointsPerWorker) {
-		for _, key := range batch {
-			job := RefreshJob{
-				ID:  result.SweepJobID,
-				Key: key,
-			}
-			if s.queue.Enqueue(job) {
-				result.Enqueued++
-			} else {
-				result.Dropped++
-				if s.jobTracker != nil && result.SweepJobID != 0 {
-					s.jobTracker.Complete(result.SweepJobID)
-				}
-			}
+	result.WorkerCount = s.policy.RevalidateWorkers
+	for _, key := range dueKeys {
+		if s.queue.Enqueue(RefreshJob{Key: key}) {
+			result.Enqueued++
+		} else {
+			result.Dropped++
 		}
 	}
-
-	if s.jobTracker != nil && result.SweepJobID != 0 {
-		_ = s.jobTracker.Wait(ctx, result.SweepJobID)
-	}
-
-	out := s.finishSweep(result)
-	if s.jobTracker != nil && result.SweepJobID != 0 {
-		s.jobTracker.Cleanup(result.SweepJobID)
-	}
-
-	return out
+	return s.finishSweep(result)
 }
 
 // Close stops the scheduler worker.
@@ -282,39 +239,6 @@ func (s *RevalidateScheduler) SetMetrics(metrics *observability.Metrics) {
 		return
 	}
 	s.metrics = metrics
-	if metrics == nil {
-		s.lastUpstreamRequests.Store(0)
-		s.lastUpstreamErrors.Store(0)
-		s.lastRefreshUpdated.Store(0)
-		s.lastRefreshNotMod.Store(0)
-		s.lastRefreshSkipped.Store(0)
-		s.lastRefreshFailed.Store(0)
-		return
-	}
-
-	snapshot := metrics.Snapshot()
-	s.lastUpstreamRequests.Store(snapshot.UpstreamRequests)
-	s.lastUpstreamErrors.Store(snapshot.UpstreamErrors)
-	s.lastRefreshUpdated.Store(snapshot.RefreshUpdated)
-	s.lastRefreshNotMod.Store(snapshot.RefreshNotMod)
-	s.lastRefreshSkipped.Store(snapshot.RefreshSkipped)
-	s.lastRefreshFailed.Store(snapshot.RefreshFailed)
-}
-
-// SetWorkerScaler attaches an optional worker scaler used to adjust refresh-worker count per sweep.
-func (s *RevalidateScheduler) SetWorkerScaler(scaler refreshWorkerScaler) {
-	if s == nil {
-		return
-	}
-	s.scaler = scaler
-}
-
-// SetJobTracker attaches optional per-sweep refresh completion tracking.
-func (s *RevalidateScheduler) SetJobTracker(tracker *RefreshJobTracker) {
-	if s == nil {
-		return
-	}
-	s.jobTracker = tracker
 }
 
 func (s *RevalidateScheduler) incRevalidateRun() {
@@ -322,36 +246,6 @@ func (s *RevalidateScheduler) incRevalidateRun() {
 		return
 	}
 	s.metrics.IncRevalidateRun()
-}
-
-func workerCountForDueEndpoints(dueEndpoints, perWorker int) int {
-	if perWorker <= 0 {
-		perWorker = cache.DefaultPolicy().RevalidateEndpointsPerWorker
-	}
-	if dueEndpoints <= 0 {
-		return 1
-	}
-
-	return (dueEndpoints + perWorker - 1) / perWorker
-}
-
-func partitionRefreshKeys(keys []string, perWorker int) [][]string {
-	if len(keys) == 0 {
-		return nil
-	}
-	if perWorker <= 0 {
-		perWorker = cache.DefaultPolicy().RevalidateEndpointsPerWorker
-	}
-
-	partitions := make([][]string, 0, workerCountForDueEndpoints(len(keys), perWorker))
-	for start := 0; start < len(keys); start += perWorker {
-		end := min(start+perWorker, len(keys))
-
-		batch := append([]string(nil), keys[start:end]...)
-		partitions = append(partitions, batch)
-	}
-
-	return partitions
 }
 
 func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) RevalidateSweepResult {
@@ -367,25 +261,8 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 		observability.Int("enqueued", result.Enqueued),
 		observability.Int("dropped", result.Dropped),
 	}
-	if result.SweepJobID != 0 {
-		fields = append(fields, observability.Any("sweep_job_id", result.SweepJobID))
-	}
 	if s.metrics != nil {
 		snapshot := s.metrics.Snapshot()
-		upstreamRequestsDelta := counterDelta(s.lastUpstreamRequests.Swap(snapshot.UpstreamRequests), snapshot.UpstreamRequests)
-		upstreamErrorsDelta := counterDelta(s.lastUpstreamErrors.Swap(snapshot.UpstreamErrors), snapshot.UpstreamErrors)
-		refreshUpdatedDelta := counterDelta(s.lastRefreshUpdated.Swap(snapshot.RefreshUpdated), snapshot.RefreshUpdated)
-		refreshNotModDelta := counterDelta(s.lastRefreshNotMod.Swap(snapshot.RefreshNotMod), snapshot.RefreshNotMod)
-		refreshSkippedDelta := counterDelta(s.lastRefreshSkipped.Swap(snapshot.RefreshSkipped), snapshot.RefreshSkipped)
-		refreshFailedDelta := counterDelta(s.lastRefreshFailed.Swap(snapshot.RefreshFailed), snapshot.RefreshFailed)
-		fields = append(fields,
-			observability.Any("cycle_upstream_requests", upstreamRequestsDelta),
-			observability.Any("cycle_upstream_errors", upstreamErrorsDelta),
-			observability.Any("cycle_refresh_updated", refreshUpdatedDelta),
-			observability.Any("cycle_refresh_not_modified", refreshNotModDelta),
-			observability.Any("cycle_refresh_skipped", refreshSkippedDelta),
-			observability.Any("cycle_refresh_failed", refreshFailedDelta),
-		)
 		if snapshot.RateLimitRemain >= 0 {
 			fields = append(fields, observability.Any("rate_limit_remaining", snapshot.RateLimitRemain))
 		} else {
@@ -395,12 +272,4 @@ func (s *RevalidateScheduler) finishSweep(result RevalidateSweepResult) Revalida
 
 	s.logger.Info("revalidation sweep complete", fields...)
 	return result
-}
-
-func counterDelta(previous, current uint64) uint64 {
-	if current < previous {
-		return current
-	}
-
-	return current - previous
 }

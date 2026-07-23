@@ -50,6 +50,8 @@ const (
 	CacheStatusRevalidated = "REVALIDATED"
 )
 
+const foregroundRequestTimeout = 30 * time.Second
+
 // CacheStore defines cache interactions used by the service.
 type CacheStore interface {
 	Get(ctx context.Context, key string) (cache.Record, bool, error)
@@ -177,6 +179,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 	}
 
 	now := s.now().UTC()
+
 	validCacheHit := cacheHit
 	if cacheHit && !isNegativeCacheableStatus(cachedRecord.SourceStatus) &&
 		isHardExpired(cachedRecord, now, s.policy.HardTTL) {
@@ -213,8 +216,8 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 	}
 
 	if coalesce && s.requestGroup != nil {
-		return s.requestGroup.Do(ctx, cacheKey, func() Response {
-			return s.handle(ctx, request, false)
+		return s.requestGroup.Do(ctx, cacheKey, func(sharedCtx context.Context) Response {
+			return s.handle(sharedCtx, request, false)
 		})
 	}
 
@@ -226,6 +229,10 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 
 	token := s.tokenProvider.NextToken()
 	startedAt := s.now()
+	resultCacheStatus := CacheStatusMiss
+	if request.ForceRefresh {
+		resultCacheStatus = CacheStatusBypass
+	}
 
 	s.incCacheMiss()
 	s.incUpstreamRequest()
@@ -309,7 +316,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 					Error:  "Invalid upstream response",
 					Detail: readErr.Error(),
 				},
-				CacheStatus:    CacheStatusMiss,
+				CacheStatus:    resultCacheStatus,
 				CacheKey:       cacheKey,
 				UpstreamStatus: resp.StatusCode,
 			}
@@ -321,7 +328,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 					Error:  "Failed to parse response",
 					Detail: "invalid JSON from upstream",
 				},
-				CacheStatus:    CacheStatusMiss,
+				CacheStatus:    resultCacheStatus,
 				CacheKey:       cacheKey,
 				UpstreamStatus: resp.StatusCode,
 			}
@@ -345,7 +352,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 		return Response{
 			StatusCode:     http.StatusOK,
 			Body:           payloadResponseBody(payload),
-			CacheStatus:    CacheStatusMiss,
+			CacheStatus:    resultCacheStatus,
 			CacheKey:       cacheKey,
 			UpstreamStatus: resp.StatusCode,
 		}
@@ -378,7 +385,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 		return Response{
 			StatusCode:     resp.StatusCode,
 			Body:           errorResponse,
-			CacheStatus:    CacheStatusMiss,
+			CacheStatus:    resultCacheStatus,
 			CacheKey:       cacheKey,
 			UpstreamStatus: resp.StatusCode,
 		}
@@ -406,7 +413,7 @@ func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Re
 	return Response{
 		StatusCode:     resp.StatusCode,
 		Body:           errorResponse,
-		CacheStatus:    CacheStatusMiss,
+		CacheStatus:    resultCacheStatus,
 		CacheKey:       cacheKey,
 		UpstreamStatus: resp.StatusCode,
 	}
@@ -779,37 +786,42 @@ func newForegroundRequestGroup() *foregroundRequestGroup {
 	return &foregroundRequestGroup{inFlight: make(map[string]*foregroundCall)}
 }
 
-func (g *foregroundRequestGroup) Do(ctx context.Context, key string, fn func() Response) Response {
+func (g *foregroundRequestGroup) Do(
+	ctx context.Context,
+	key string,
+	fn func(context.Context) Response,
+) Response {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	g.mu.Lock()
-	if call, exists := g.inFlight[key]; exists {
-		g.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.response
-		case <-ctx.Done():
-			return Response{
-				StatusCode:  http.StatusGatewayTimeout,
-				Body:        ErrorResponse{Error: "Request canceled"},
-				CacheStatus: CacheStatusBypass,
-				CacheKey:    key,
-			}
-		}
+	call, exists := g.inFlight[key]
+	if !exists {
+		call = &foregroundCall{done: make(chan struct{})}
+		g.inFlight[key] = call
+		sharedCtx, cancel := context.WithTimeout(context.Background(), foregroundRequestTimeout)
+		go func() {
+			defer cancel()
+			call.response = fn(sharedCtx)
+			g.mu.Lock()
+			delete(g.inFlight, key)
+			close(call.done)
+			g.mu.Unlock()
+		}()
 	}
-	call := &foregroundCall{done: make(chan struct{})}
-	g.inFlight[key] = call
 	g.mu.Unlock()
 
-	defer func() {
-		g.mu.Lock()
-		delete(g.inFlight, key)
-		close(call.done)
-		g.mu.Unlock()
-	}()
-	call.response = fn()
-	return call.response
+	select {
+	case <-call.done:
+		return call.response
+	case <-ctx.Done():
+		return Response{
+			StatusCode:  http.StatusGatewayTimeout,
+			Body:        ErrorResponse{Error: "Request canceled"},
+			CacheStatus: CacheStatusBypass,
+			CacheKey:    key,
+		}
+	}
 }
 
 func buildAllowedHostSet(allowedHosts []string) map[string]struct{} {

@@ -40,42 +40,14 @@ func TestRefreshWorkersProcessQueuedKeys(t *testing.T) {
 	}
 }
 
-func TestRefreshWorkersMarkTrackedJobCompletion(t *testing.T) {
-	t.Parallel()
-
-	queue := NewRefreshQueue(4)
-	defer queue.Close()
-
-	refresher := newFakeRefreshByKeyRequester()
-	workers := newRefreshWorkers(queue, refresher, 1, 1000, nil, time.Now, true)
-	tracker := NewRefreshJobTracker()
-	workers.SetJobTracker(tracker)
-	defer workers.Close()
-
-	const jobID uint64 = 42
-	tracker.Start(jobID, 2)
-	if ok := queue.Enqueue(RefreshJob{ID: jobID, Key: "key-1"}); !ok {
-		t.Fatal("expected first enqueue to succeed")
-	}
-	if ok := queue.Enqueue(RefreshJob{ID: jobID, Key: "key-2"}); !ok {
-		t.Fatal("expected second enqueue to succeed")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if ok := tracker.Wait(ctx, jobID); !ok {
-		t.Fatal("expected tracked job completion to be observed")
-	}
-}
-
-func TestRefreshWorkersSetWorkerCountScalesUp(t *testing.T) {
+func TestRefreshWorkersUseConfiguredFixedConcurrency(t *testing.T) {
 	t.Parallel()
 
 	queue := NewRefreshQueue(8)
 	defer queue.Close()
 
 	refresher := newBlockingRefreshByKeyRequester()
-	workers := newRefreshWorkers(queue, refresher, 1, 1000, nil, time.Now, true)
+	workers := newRefreshWorkers(queue, refresher, 3, 1000, nil, time.Now, true)
 	defer workers.Close()
 
 	if ok := queue.Enqueue(RefreshJob{Key: "key-1"}); !ok {
@@ -88,8 +60,6 @@ func TestRefreshWorkersSetWorkerCountScalesUp(t *testing.T) {
 		t.Fatal("expected enqueue for key-3 to succeed")
 	}
 
-	refresher.waitForStarted(t, 1, time.Second)
-	workers.SetWorkerCount(3)
 	refresher.waitForStarted(t, 3, time.Second)
 
 	refresher.releaseAll()

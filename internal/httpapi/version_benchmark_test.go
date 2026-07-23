@@ -100,12 +100,12 @@ func newBenchmarkVersionService(b *testing.B, rawURL string) (*versionservice.Se
 		b.Fatalf("failed to build cache key: %v", err)
 	}
 
-	store := cache.NewFacade(l1.NewCacheWithMaxBytes(1<<20), nil, nil)
+	store := l1.NewStore(l1.NewCacheWithMaxBytes(1 << 20))
 	if _, err := store.Set(cacheKey, record); err != nil {
 		b.Fatalf("failed to warm cache: %v", err)
 	}
 
-	hitRecorder := versionservice.NewHitRecorder(benchmarkActiveKeyIndex{}, 1024, nil)
+	hitRecorder := versionservice.NewActivityTracker()
 	service := versionservice.NewService(
 		store,
 		hitRecorder,
@@ -116,7 +116,7 @@ func newBenchmarkVersionService(b *testing.B, rawURL string) (*versionservice.Se
 		policy,
 	)
 
-	return service, hitRecorder.Close
+	return service, func() {}
 }
 
 func newBenchmarkRequestCtx(method, uri string) *fasthttp.RequestCtx {
@@ -134,14 +134,4 @@ func benchmarkResolveClientIP(ctx *fasthttp.RequestCtx) string {
 		return ""
 	}
 	return ctx.RemoteAddr().String()
-}
-
-type benchmarkActiveKeyIndex struct{}
-
-func (benchmarkActiveKeyIndex) UpsertActiveKey(context.Context, string, time.Time) error {
-	return nil
-}
-
-func (benchmarkActiveKeyIndex) ActiveKeysSince(context.Context, time.Time, int) ([]string, error) {
-	return nil, nil
 }

@@ -34,7 +34,7 @@ func NormalizeURL(rawURL string) (string, error) {
 	return normalizeParsedURL(parsed), nil
 }
 
-// KeyFromURL returns a deterministic Redis-safe cache key for a URL.
+// KeyFromURL returns a deterministic cache key for a URL.
 func KeyFromURL(rawURL string) (string, error) {
 	normalized, err := NormalizeURL(rawURL)
 	if err != nil {
@@ -44,7 +44,7 @@ func KeyFromURL(rawURL string) (string, error) {
 	return keyFromNormalizedURL(normalized), nil
 }
 
-// KeyFromParsedURL returns a deterministic Redis-safe cache key from an already parsed URL.
+// KeyFromParsedURL returns a deterministic cache key from an already parsed URL.
 func KeyFromParsedURL(parsedURL *url.URL) (string, error) {
 	if parsedURL == nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		return "", ErrCacheURLInvalid
