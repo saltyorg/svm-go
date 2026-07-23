@@ -480,8 +480,8 @@ func TestServiceHandleMissPerformsSynchronousUpstreamRefresh(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
 	}
-	if l2Store.getCalls != 1 {
-		t.Fatalf("expected one L2 read before upstream refresh, got %d", l2Store.getCalls)
+	if l2Store.getCalls != 2 {
+		t.Fatalf("expected cache recheck by the coalesced miss leader, got %d L2 reads", l2Store.getCalls)
 	}
 	if upstream.getCalls != 1 {
 		t.Fatalf("expected one upstream call on cache miss, got %d", upstream.getCalls)
@@ -1125,6 +1125,67 @@ func TestServiceHandleFreshHitNotBlockedByInFlightBackgroundRefresh(t *testing.T
 
 	if calls := upstream.callCount(); calls != 1 {
 		t.Fatalf("expected only one upstream background refresh call, got %d", calls)
+	}
+}
+
+func TestServiceHandleCoalescesConcurrentCacheMisses(t *testing.T) {
+	t.Parallel()
+
+	rawURL := "https://api.github.com/repos/org/repo/releases/latest"
+	cacheStore := &fakeCacheStore{}
+	upstream := newBlockingUpstreamClient(http.StatusOK, `{"tag_name":"v1"}`)
+	service := NewService(
+		cacheStore,
+		nil,
+		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
+		upstream,
+		nil,
+		nil,
+		cache.DefaultPolicy(),
+	)
+
+	responses := make(chan Response, 2)
+	for range 2 {
+		go func() {
+			responses <- service.Handle(context.Background(), Request{RawURL: rawURL})
+		}()
+	}
+	upstream.waitStarted(t)
+	time.Sleep(25 * time.Millisecond)
+	upstream.release()
+
+	for range 2 {
+		response := <-responses
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected status %d, got %d", http.StatusOK, response.StatusCode)
+		}
+	}
+	if calls := upstream.callCount(); calls != 1 {
+		t.Fatalf("expected one coalesced upstream request, got %d", calls)
+	}
+}
+
+func TestServiceHandleRejectsOversizedUpstreamResponse(t *testing.T) {
+	t.Parallel()
+
+	policy := cache.DefaultPolicy()
+	policy.MaxUpstreamResponseBytes = 4
+	upstream := &fakeUpstreamClient{responseBody: `{"tag_name":"too-large"}`}
+	service := NewService(
+		nil,
+		nil,
+		upstreamgithub.NewRoundRobinTokenProvider([]string{"token-a"}),
+		upstream,
+		nil,
+		nil,
+		policy,
+	)
+
+	response := service.Handle(context.Background(), Request{
+		RawURL: "https://api.github.com/repos/org/repo/releases/latest",
+	})
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, response.StatusCode)
 	}
 }
 

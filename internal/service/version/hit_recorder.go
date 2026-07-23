@@ -16,6 +16,10 @@ type ActiveKeyIndexer interface {
 	ActiveKeysSince(ctx context.Context, since time.Time, limit int) ([]string, error)
 }
 
+type activeKeyPruner interface {
+	PruneActiveKeysBefore(ctx context.Context, cutoff time.Time) error
+}
+
 type hitSignal struct {
 	key   string
 	hitAt time.Time
@@ -85,6 +89,18 @@ func (r *HitRecorder) ActiveKeysSince(ctx context.Context, since time.Time, limi
 	return r.index.ActiveKeysSince(ctx, since, limit)
 }
 
+// PruneActiveKeysBefore removes index entries outside the scheduler lookback window.
+func (r *HitRecorder) PruneActiveKeysBefore(ctx context.Context, cutoff time.Time) error {
+	if r == nil || r.index == nil {
+		return nil
+	}
+	pruner, ok := r.index.(activeKeyPruner)
+	if !ok {
+		return nil
+	}
+	return pruner.PruneActiveKeysBefore(ctx, cutoff)
+}
+
 // Close stops the recorder worker.
 func (r *HitRecorder) Close() {
 	if r == nil || r.cancel == nil {
@@ -103,7 +119,7 @@ func (r *HitRecorder) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case signal := <-r.queue:
-			if err := r.index.UpsertActiveKey(context.Background(), signal.key, signal.hitAt); err != nil {
+			if err := r.index.UpsertActiveKey(ctx, signal.key, signal.hitAt); err != nil {
 				r.logger.Warn(
 					"failed to upsert active key",
 					observability.String("key", signal.key),

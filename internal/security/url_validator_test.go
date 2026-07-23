@@ -34,6 +34,11 @@ func TestParseHTTPSURL(t *testing.T) {
 			wantErr: ErrHTTPSOnly,
 		},
 		{
+			name:    "userinfo rejected",
+			rawURL:  "https://user:secret@api.github.com/releases/latest",
+			wantErr: ErrURLUserinfoNotAllowed,
+		},
+		{
 			name:   "https accepted",
 			rawURL: "https://api.github.com/repos/org/repo/releases/latest",
 		},

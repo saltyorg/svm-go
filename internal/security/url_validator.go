@@ -15,6 +15,8 @@ var (
 	ErrHTTPSOnly = errors.New("url scheme must be https")
 	// ErrUpstreamHostNotAllowed indicates that the parsed host is outside the allowlist.
 	ErrUpstreamHostNotAllowed = errors.New("upstream host is not allowlisted")
+	// ErrURLUserinfoNotAllowed prevents credentials from being embedded in upstream URLs.
+	ErrURLUserinfoNotAllowed = errors.New("url userinfo is not allowed")
 )
 
 // ParseHTTPSURL parses and validates a request URL for upstream fetching.
@@ -50,8 +52,16 @@ func parseHTTPSURL(rawURL string) (*url.URL, error) {
 	if !strings.EqualFold(parsedURL.Scheme, "https") {
 		return nil, ErrHTTPSOnly
 	}
+	if parsedURL.User != nil {
+		return nil, ErrURLUserinfoNotAllowed
+	}
 
 	return parsedURL, nil
+}
+
+// HostAllowed reports whether a hostname exactly matches a non-empty allowlist.
+func HostAllowed(host string, allowedHosts []string) bool {
+	return hostAllowed(host, allowedHosts)
 }
 
 func hostAllowed(host string, allowedHosts []string) bool {

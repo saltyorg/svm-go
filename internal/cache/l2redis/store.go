@@ -43,11 +43,28 @@ type redisZSetReader interface {
 	ZRangeByScore(ctx context.Context, key string, opt *redis.ZRangeBy) *redis.StringSliceCmd
 }
 
+type redisZSetPruner interface {
+	ZRemRangeByScore(ctx context.Context, key, min, max string) *redis.IntCmd
+}
+
 type redisReadWriter interface {
 	redisGetter
 	redisSetter
 	redisZSetWriter
 	redisZSetReader
+	redisZSetPruner
+}
+
+// PruneActiveKeysBefore removes inactive index entries older than the cutoff.
+func (s *Store) PruneActiveKeysBefore(ctx context.Context, cutoff time.Time) error {
+	if s == nil || s.client == nil {
+		return ErrStoreNotConfigured
+	}
+	max := fmt.Sprintf("(%d", cutoff.UTC().Unix())
+	if err := s.client.ZRemRangeByScore(ctx, activeIndexKey, "-inf", max).Err(); err != nil {
+		return fmt.Errorf("redis prune active keys: %w", err)
+	}
+	return nil
 }
 
 // Store manages L2 record persistence and hydration via Redis.

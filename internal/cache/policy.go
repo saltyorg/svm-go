@@ -14,6 +14,7 @@ const (
 	defaultRetryMaxInterval          = 30 * time.Second
 	defaultRetryMaxAge               = 5 * time.Minute
 	defaultL1MaxGB                   = 1.0
+	defaultMaxUpstreamResponseBytes  = 10 * 1024 * 1024
 	defaultShutdownDrainTimeout      = 2 * time.Second
 )
 
@@ -30,6 +31,7 @@ type Policy struct {
 	WriteBehindRetryMaxInterval  time.Duration
 	WriteBehindRetryMaxAge       time.Duration
 	L1MaxGB                      float64
+	MaxUpstreamResponseBytes     int64
 	ShutdownDrainTimeout         time.Duration
 }
 
@@ -47,6 +49,7 @@ func DefaultPolicy() Policy {
 		WriteBehindRetryMaxInterval:  defaultRetryMaxInterval,
 		WriteBehindRetryMaxAge:       defaultRetryMaxAge,
 		L1MaxGB:                      defaultL1MaxGB,
+		MaxUpstreamResponseBytes:     defaultMaxUpstreamResponseBytes,
 		ShutdownDrainTimeout:         defaultShutdownDrainTimeout,
 	}
 }

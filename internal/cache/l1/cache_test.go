@@ -69,7 +69,7 @@ func TestCacheEstimatedUsageTracksSetAndOverwrite(t *testing.T) {
 	l1 := NewCache()
 
 	l1.Set("a", cache.Record{Payload: []byte("12345")})
-	want := recordMetadataOverheadBytes + 5
+	want := recordMetadataOverheadBytes + int64(len("a")) + 5
 	if got := l1.EstimatedUsageBytes(); got != want {
 		t.Fatalf("expected usage %d, got %d", want, got)
 	}
@@ -78,7 +78,7 @@ func TestCacheEstimatedUsageTracksSetAndOverwrite(t *testing.T) {
 	}
 
 	l1.Set("b", cache.Record{Payload: []byte("123")})
-	want = (2 * recordMetadataOverheadBytes) + 8
+	want = (2 * recordMetadataOverheadBytes) + int64(len("a")+len("b")) + 8
 	if got := l1.EstimatedUsageBytes(); got != want {
 		t.Fatalf("expected usage %d, got %d", want, got)
 	}
@@ -87,7 +87,7 @@ func TestCacheEstimatedUsageTracksSetAndOverwrite(t *testing.T) {
 	}
 
 	l1.Set("a", cache.Record{Payload: []byte("12")})
-	want = (2 * recordMetadataOverheadBytes) + 5
+	want = (2 * recordMetadataOverheadBytes) + int64(len("a")+len("b")) + 5
 	if got := l1.EstimatedUsageBytes(); got != want {
 		t.Fatalf("expected usage %d, got %d", want, got)
 	}
@@ -99,7 +99,7 @@ func TestCacheEstimatedUsageTracksSetAndOverwrite(t *testing.T) {
 func TestCacheEvictsLeastRecentlyUsedWhenBudgetExceeded(t *testing.T) {
 	t.Parallel()
 
-	entryBytes := recordMetadataOverheadBytes + 1
+	entryBytes := recordMetadataOverheadBytes + int64(len("a")) + 1
 	l1 := NewCacheWithMaxBytes(entryBytes * 2)
 
 	l1.Set("a", cache.Record{Payload: []byte("1")})

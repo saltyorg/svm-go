@@ -11,6 +11,7 @@ Returns upstream JSON response data for the provided URL.
 Behavior:
 - Accepts only valid `https` URLs.
 - URL host must be in the allowlist (defaults to known GitHub API/content hosts).
+- Redirect destinations are revalidated against HTTPS and the same host allowlist.
 - `ALLOWED_UPSTREAM_HOSTS` can override the default allowlist.
 - Uses cache-first lookup (`L1` memory, then Redis hydrate on miss).
 - `refresh=true` bypasses cache-hit fast return and forces immediate upstream refresh.
@@ -104,6 +105,7 @@ Duration values use Go duration syntax (for example `30s`, `5m`, `24h`) and also
 | `WRITE_BEHIND_RETRY_MAX_INTERVAL` | no | `30s` | Max exponential backoff interval for write-behind retries. |
 | `WRITE_BEHIND_RETRY_MAX_AGE` | no | `5m` | Drop queued write-behind events older than this age. |
 | `CACHE_L1_MAX_GB` | no | `1.0` | L1 memory cache target size in GiB (LRU eviction). |
+| `MAX_UPSTREAM_RESPONSE_BYTES` | no | `10485760` | Maximum accepted upstream response body size in bytes. |
 | `SHUTDOWN_DRAIN_TIMEOUT` | no | `2s` | Max shutdown drain time for write-behind queue. |
 
 ## Cache semantics

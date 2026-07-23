@@ -3,8 +3,10 @@ package version
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +89,7 @@ type Service struct {
 	now            func() time.Time
 	refreshGroup   *backgroundRefreshGroup
 	requestPrep    *requestPrepCache
+	requestGroup   *foregroundRequestGroup
 }
 
 // NewService builds a version service with safe defaults for optional dependencies.
@@ -112,6 +115,9 @@ func NewService(
 	if policy.NegativeTTL <= 0 {
 		policy.NegativeTTL = defaultPolicy.NegativeTTL
 	}
+	if policy.MaxUpstreamResponseBytes <= 0 {
+		policy.MaxUpstreamResponseBytes = defaultPolicy.MaxUpstreamResponseBytes
+	}
 
 	return &Service{
 		cache:          cacheStore,
@@ -125,6 +131,7 @@ func NewService(
 		now:            time.Now,
 		refreshGroup:   newBackgroundRefreshGroup(),
 		requestPrep:    newRequestPrepCache(0),
+		requestGroup:   newForegroundRequestGroup(),
 	}
 }
 
@@ -138,6 +145,10 @@ func (s *Service) SetMetrics(metrics *observability.Metrics) {
 
 // Handle resolves a version payload from cache or upstream and returns a response envelope.
 func (s *Service) Handle(ctx context.Context, request Request) Response {
+	return s.handle(ctx, request, true)
+}
+
+func (s *Service) handle(ctx context.Context, request Request, coalesce bool) Response {
 	prepared := s.prepareRequest(request.RawURL)
 	err := prepared.err
 	if err != nil {
@@ -201,6 +212,12 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 
 	}
 
+	if coalesce && s.requestGroup != nil {
+		return s.requestGroup.Do(ctx, cacheKey, func() Response {
+			return s.handle(ctx, request, false)
+		})
+	}
+
 	hasConditionalCandidate := cacheHit && !isNegativeCacheableStatus(cachedRecord.SourceStatus) && cachedRecord.ETag != ""
 	etag := ""
 	if hasConditionalCandidate {
@@ -222,11 +239,14 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			observability.String("uri", request.URI),
 		)
 
+		statusCode := http.StatusBadGateway
+		if ctx != nil && ctx.Err() != nil {
+			statusCode = http.StatusGatewayTimeout
+		}
 		return Response{
-			StatusCode: http.StatusBadRequest,
+			StatusCode: statusCode,
 			Body: ErrorResponse{
-				Error:  "Invalid request",
-				Detail: err.Error(),
+				Error: "Upstream request failed",
 			},
 			CacheStatus: CacheStatusBypass,
 			CacheKey:    cacheKey,
@@ -258,7 +278,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 		observability.String("method", http.MethodGet),
 		observability.Float64("response_size_kib", float64(contentLength)/1024),
 		observability.Int("status", resp.StatusCode),
-		observability.String("uri", urlToFetch),
+		observability.String("uri", redactedURLForLog(urlToFetch)),
 		observability.String("rate_limit_remaining", remaining),
 	)
 
@@ -281,12 +301,12 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 			}
 		}
 	} else if resp.StatusCode == http.StatusOK {
-		payload, readErr := io.ReadAll(resp.Body)
+		payload, readErr := readBoundedBody(resp.Body, s.policy.MaxUpstreamResponseBytes)
 		if readErr != nil {
 			return Response{
-				StatusCode: http.StatusInternalServerError,
+				StatusCode: http.StatusBadGateway,
 				Body: ErrorResponse{
-					Error:  "Failed to parse response",
+					Error:  "Invalid upstream response",
 					Detail: readErr.Error(),
 				},
 				CacheStatus:    CacheStatusMiss,
@@ -296,7 +316,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 		}
 		if !json.Valid(payload) {
 			return Response{
-				StatusCode: http.StatusInternalServerError,
+				StatusCode: http.StatusBadGateway,
 				Body: ErrorResponse{
 					Error:  "Failed to parse response",
 					Detail: "invalid JSON from upstream",
@@ -334,7 +354,7 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 		s.incUpstreamError()
 	}
 
-	responseBodyBytes, readErr := io.ReadAll(resp.Body)
+	responseBodyBytes, readErr := readBoundedBody(resp.Body, s.policy.MaxUpstreamResponseBytes)
 	if readErr != nil {
 		responseBodyBytes = nil
 	}
@@ -390,6 +410,17 @@ func (s *Service) Handle(ctx context.Context, request Request) Response {
 		CacheKey:       cacheKey,
 		UpstreamStatus: resp.StatusCode,
 	}
+}
+
+func redactedURLForLog(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.User = nil
+	return parsed.String()
 }
 
 func (s *Service) prepareRequest(rawURL string) preparedRequest {
@@ -695,7 +726,7 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 		_, _ = s.setToCache(cacheKey, record)
 		s.incRefreshNotMod()
 	case http.StatusOK:
-		payload, readErr := io.ReadAll(resp.Body)
+		payload, readErr := readBoundedBody(resp.Body, s.policy.MaxUpstreamResponseBytes)
 		if readErr != nil || !json.Valid(payload) {
 			s.incRefreshFailed()
 			return
@@ -716,6 +747,69 @@ func (s *Service) refreshCachedRecord(cacheKey, urlToFetch string, record cache.
 	default:
 		s.incRefreshFailed()
 	}
+}
+
+var errUpstreamResponseTooLarge = errors.New("upstream response exceeds configured size limit")
+
+func readBoundedBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = cache.DefaultPolicy().MaxUpstreamResponseBytes
+	}
+	payload, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, errUpstreamResponseTooLarge
+	}
+	return payload, nil
+}
+
+type foregroundCall struct {
+	done     chan struct{}
+	response Response
+}
+
+type foregroundRequestGroup struct {
+	mu       sync.Mutex
+	inFlight map[string]*foregroundCall
+}
+
+func newForegroundRequestGroup() *foregroundRequestGroup {
+	return &foregroundRequestGroup{inFlight: make(map[string]*foregroundCall)}
+}
+
+func (g *foregroundRequestGroup) Do(ctx context.Context, key string, fn func() Response) Response {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	g.mu.Lock()
+	if call, exists := g.inFlight[key]; exists {
+		g.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.response
+		case <-ctx.Done():
+			return Response{
+				StatusCode:  http.StatusGatewayTimeout,
+				Body:        ErrorResponse{Error: "Request canceled"},
+				CacheStatus: CacheStatusBypass,
+				CacheKey:    key,
+			}
+		}
+	}
+	call := &foregroundCall{done: make(chan struct{})}
+	g.inFlight[key] = call
+	g.mu.Unlock()
+
+	defer func() {
+		g.mu.Lock()
+		delete(g.inFlight, key)
+		close(call.done)
+		g.mu.Unlock()
+	}()
+	call.response = fn()
+	return call.response
 }
 
 func buildAllowedHostSet(allowedHosts []string) map[string]struct{} {

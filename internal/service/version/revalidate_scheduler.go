@@ -14,6 +14,10 @@ type activeKeySource interface {
 	ActiveKeysSince(ctx context.Context, since time.Time, limit int) ([]string, error)
 }
 
+type staleActiveKeyPruner interface {
+	PruneActiveKeysBefore(ctx context.Context, cutoff time.Time) error
+}
+
 type refreshEnqueuer interface {
 	Enqueue(job RefreshJob) bool
 }
@@ -151,6 +155,11 @@ func (s *RevalidateScheduler) Sweep(ctx context.Context) RevalidateSweepResult {
 
 	now := s.now().UTC()
 	since := now.Add(-s.policy.RevalidateLookback)
+	if pruner, ok := s.activeKeys.(staleActiveKeyPruner); ok {
+		if err := pruner.PruneActiveKeysBefore(ctx, since); err != nil {
+			s.logger.Warn("failed to prune inactive keys", observability.String("error", err.Error()))
+		}
+	}
 	keys, err := s.activeKeys.ActiveKeysSince(ctx, since, 0)
 	if err != nil {
 		s.logger.Warn(

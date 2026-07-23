@@ -54,6 +54,9 @@ func Load() (Config, error) {
 	cfg.RedisHost = os.Getenv("REDIS_HOST")
 	cfg.ForwardedAllowIPs = os.Getenv("FORWARDED_ALLOW_IPS")
 	cfg.AllowedUpstreamHosts = loadAllowedUpstreamHosts()
+	if len(cfg.AllowedUpstreamHosts) == 0 {
+		return Config{}, fmt.Errorf("ALLOWED_UPSTREAM_HOSTS must contain at least one host")
+	}
 	cfg.CachePolicy, err = loadCachePolicy()
 	if err != nil {
 		return Config{}, err
@@ -164,12 +167,36 @@ func loadCachePolicy() (cache.Policy, error) {
 		return cache.Policy{}, err
 	}
 
+	policy.MaxUpstreamResponseBytes, err = parseEnvPositiveInt64(
+		"MAX_UPSTREAM_RESPONSE_BYTES",
+		policy.MaxUpstreamResponseBytes,
+	)
+	if err != nil {
+		return cache.Policy{}, err
+	}
+
 	policy.ShutdownDrainTimeout, err = parseEnvDuration("SHUTDOWN_DRAIN_TIMEOUT", policy.ShutdownDrainTimeout)
 	if err != nil {
 		return cache.Policy{}, err
 	}
 
 	return policy, nil
+}
+
+func parseEnvPositiveInt64(name string, defaultValue int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %v", name, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", name)
+	}
+	return value, nil
 }
 
 func parseEnvDuration(name string, defaultValue time.Duration) (time.Duration, error) {

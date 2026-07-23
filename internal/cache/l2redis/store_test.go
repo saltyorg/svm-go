@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +153,28 @@ func TestStoreActiveKeysSinceHonorsLimit(t *testing.T) {
 	}
 }
 
+func TestStorePruneActiveKeysBefore(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fake := newFakeRedisClient()
+	store := NewStore(fake)
+	base := time.Date(2026, 2, 21, 20, 0, 0, 0, time.UTC)
+	_ = store.UpsertActiveKey(ctx, "old", base)
+	_ = store.UpsertActiveKey(ctx, "cutoff", base.Add(time.Minute))
+	_ = store.UpsertActiveKey(ctx, "new", base.Add(2*time.Minute))
+
+	if err := store.PruneActiveKeysBefore(ctx, base.Add(time.Minute)); err != nil {
+		t.Fatalf("expected nil prune error, got %v", err)
+	}
+	if _, ok := fake.activeIndex["old"]; ok {
+		t.Fatal("expected old key to be pruned")
+	}
+	if _, ok := fake.activeIndex["cutoff"]; !ok {
+		t.Fatal("expected cutoff key to remain")
+	}
+}
+
 func TestStoreReturnsZSetErrors(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +202,19 @@ type fakeRedisClient struct {
 	setErr      error
 	zAddErr     error
 	zRangeErr   error
+}
+
+func (f *fakeRedisClient) ZRemRangeByScore(_ context.Context, _ string, min, max string) *redis.IntCmd {
+	minValue, _ := strconv.ParseFloat(strings.TrimPrefix(min, "("), 64)
+	maxValue, _ := strconv.ParseFloat(strings.TrimPrefix(max, "("), 64)
+	var removed int64
+	for key, score := range f.activeIndex {
+		if score >= minValue && score < maxValue {
+			delete(f.activeIndex, key)
+			removed++
+		}
+	}
+	return redis.NewIntResult(removed, nil)
 }
 
 func newFakeRedisClient() *fakeRedisClient {

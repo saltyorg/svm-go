@@ -423,8 +423,8 @@ func TestShutdownBackgroundClosesRuntimeComponents(t *testing.T) {
 	if drainer.closeWithDrainCalls != 1 {
 		t.Fatalf("expected write-behind drain once, got %d", drainer.closeWithDrainCalls)
 	}
-	if drainer.lastTimeout != 75*time.Millisecond {
-		t.Fatalf("expected drain timeout 75ms, got %s", drainer.lastTimeout)
+	if drainer.lastTimeout <= 0 || drainer.lastTimeout > 75*time.Millisecond {
+		t.Fatalf("expected a positive drain timeout within 75ms, got %s", drainer.lastTimeout)
 	}
 }
 
@@ -496,8 +496,8 @@ func TestRunServerWithLifecycleHandlesSignalAndTriggersShutdownSequence(t *testi
 	if drainer.closeWithDrainCalls != 1 {
 		t.Fatalf("expected write-behind drain once, got %d", drainer.closeWithDrainCalls)
 	}
-	if drainer.lastTimeout != 120*time.Millisecond {
-		t.Fatalf("expected drain timeout 120ms, got %s", drainer.lastTimeout)
+	if drainer.lastTimeout <= 0 || drainer.lastTimeout > 120*time.Millisecond {
+		t.Fatalf("expected a positive drain timeout within 120ms, got %s", drainer.lastTimeout)
 	}
 }
 

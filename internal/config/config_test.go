@@ -38,6 +38,15 @@ func TestLoadUsesDefaultAllowedUpstreamHostsWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsExplicitlyEmptyAllowedUpstreamHosts(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALLOWED_UPSTREAM_HOSTS", " , , ")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected empty allowlist error")
+	}
+}
+
 func TestLoadAppliesDefaultCachePolicy(t *testing.T) {
 	setRequiredEnv(t)
 
@@ -65,6 +74,7 @@ func TestLoadParsesCachePolicyOverrides(t *testing.T) {
 	t.Setenv("WRITE_BEHIND_RETRY_MAX_INTERVAL", "45s")
 	t.Setenv("WRITE_BEHIND_RETRY_MAX_AGE", "10m")
 	t.Setenv("CACHE_L1_MAX_GB", "2.5")
+	t.Setenv("MAX_UPSTREAM_RESPONSE_BYTES", "2048")
 	t.Setenv("SHUTDOWN_DRAIN_TIMEOUT", "4s")
 
 	cfg, err := Load()
@@ -84,6 +94,9 @@ func TestLoadParsesCachePolicyOverrides(t *testing.T) {
 	}
 	if got.RevalidateLookback != 14*24*time.Hour {
 		t.Fatalf("expected RevalidateLookback 336h, got %s", got.RevalidateLookback)
+	}
+	if got.MaxUpstreamResponseBytes != 2048 {
+		t.Fatalf("expected MaxUpstreamResponseBytes 2048, got %d", got.MaxUpstreamResponseBytes)
 	}
 	if got.RevalidateEndpointsPerWorker != 50 {
 		t.Fatalf("expected RevalidateEndpointsPerWorker 50, got %d", got.RevalidateEndpointsPerWorker)

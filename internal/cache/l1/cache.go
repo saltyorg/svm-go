@@ -7,7 +7,7 @@ import (
 	"svm/internal/cache"
 )
 
-const recordMetadataOverheadBytes int64 = 128
+const recordMetadataOverheadBytes int64 = 256
 const bytesPerGiB float64 = 1024 * 1024 * 1024
 
 type entry struct {
@@ -93,7 +93,7 @@ func (c *Cache) Set(key string, record cache.Record) {
 	}
 
 	cloned := cloneRecord(record)
-	sizeBytes := estimateEntryUsage(cloned)
+	sizeBytes := estimateEntryUsage(key, cloned)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -174,6 +174,6 @@ func cloneRecord(record cache.Record) cache.Record {
 	return cloned
 }
 
-func estimateEntryUsage(record cache.Record) int64 {
-	return int64(len(record.Payload)) + recordMetadataOverheadBytes
+func estimateEntryUsage(key string, record cache.Record) int64 {
+	return int64(len(key)+len(record.Payload)+len(record.ETag)+len(record.URL)) + recordMetadataOverheadBytes
 }

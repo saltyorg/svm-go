@@ -2,8 +2,12 @@ package github
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/url"
 	"time"
+
+	"svm/internal/security"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -17,6 +21,8 @@ type Client struct {
 	httpClient *http.Client
 }
 
+var ErrRedirectNotAllowed = errors.New("upstream redirect destination is not allowed")
+
 // RateLimitedTokenObserver tracks temporary token cooldowns.
 type RateLimitedTokenObserver interface {
 	ObserveRateLimitedToken(token string)
@@ -24,10 +30,17 @@ type RateLimitedTokenObserver interface {
 
 // NewClient creates a client with default timeout behavior.
 func NewClient() *Client {
-	return NewClientWithHTTPClient(&http.Client{
+	return NewClientWithAllowedHosts(nil)
+}
+
+// NewClientWithAllowedHosts creates a client that validates every redirect destination.
+func NewClientWithAllowedHosts(allowedHosts []string) *Client {
+	client := &http.Client{
 		Timeout:   defaultTimeout,
 		Transport: newDefaultTransport(),
-	})
+	}
+	client.CheckRedirect = redirectValidator(allowedHosts)
+	return NewClientWithHTTPClient(client)
 }
 
 // NewClientWithHTTPClient creates a client with an injected HTTP client.
@@ -43,6 +56,23 @@ func NewClientWithHTTPClient(httpClient *http.Client) *Client {
 	}
 
 	return &Client{httpClient: httpClient}
+}
+
+func redirectValidator(allowedHosts []string) func(*http.Request, []*http.Request) error {
+	hosts := append([]string(nil), allowedHosts...)
+	return func(req *http.Request, _ []*http.Request) error {
+		if req == nil || req.URL == nil || !redirectURLAllowed(req.URL, hosts) {
+			return ErrRedirectNotAllowed
+		}
+		return nil
+	}
+}
+
+func redirectURLAllowed(destination *url.URL, allowedHosts []string) bool {
+	if destination == nil || destination.User != nil || destination.Scheme != "https" {
+		return false
+	}
+	return len(allowedHosts) == 0 || security.HostAllowed(destination.Hostname(), allowedHosts)
 }
 
 // Get performs a GET request with auth and optional conditional request headers.

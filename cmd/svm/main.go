@@ -123,7 +123,7 @@ func NewApp() (*App, error) {
 		cachePolicy:     cfg.CachePolicy,
 		requestLogQueue: make(chan requestLogEntry, requestLogQueueSize),
 		requestLogDone:  make(chan struct{}),
-		upstreamClient:  upstreamgithub.NewClient(),
+		upstreamClient:  upstreamgithub.NewClientWithAllowedHosts(cfg.AllowedUpstreamHosts),
 	}
 
 	// Parse trusted networks for X-Forwarded-For validation (supports CIDR notation)
@@ -341,7 +341,7 @@ func (app *App) enqueueClientRequestLog(ctx *fasthttp.RequestCtx) {
 	entry := requestLogEntry{
 		clientIP:   app.getClientIP(ctx),
 		method:     string(ctx.Method()),
-		requestURI: string(ctx.RequestURI()),
+		requestURI: string(ctx.Path()),
 		proto:      proto,
 		statusCode: statusCode,
 	}
@@ -385,14 +385,28 @@ func (app *App) shutdownBackground(timeout time.Duration) {
 		return
 	}
 
-	appcore.CloseOnShutdown(
-		app.revalidateScheduler,
-		app.refreshWorkers,
-		app.refreshQueue,
-		app.hitRecorder,
-	)
-	appcore.DrainOnShutdown(timeout, app.writeBehind)
-	app.shutdownRequestLogs(timeout)
+	deadline := time.Now().Add(timeout)
+	closed := make(chan struct{})
+	go func() {
+		appcore.CloseOnShutdown(
+			app.revalidateScheduler,
+			app.refreshWorkers,
+			app.refreshQueue,
+			app.hitRecorder,
+		)
+		close(closed)
+	}()
+	if remaining := time.Until(deadline); remaining > 0 {
+		timer := time.NewTimer(remaining)
+		select {
+		case <-closed:
+			timer.Stop()
+		case <-timer.C:
+			app.getLogger().Warn("background worker shutdown timed out")
+		}
+	}
+	appcore.DrainOnShutdown(max(time.Until(deadline), time.Nanosecond), app.writeBehind)
+	app.shutdownRequestLogs(max(time.Until(deadline), time.Nanosecond))
 
 	if app.redisClient != nil {
 		if err := app.redisClient.Close(); err != nil {
@@ -437,10 +451,11 @@ func (app *App) shutdown(server gracefulShutdownServer) error {
 	}
 
 	timeout := app.shutdownDrainTimeout()
+	deadline := time.Now().Add(timeout)
 	var serverErr error
 
 	if server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 
 		if err := server.ShutdownWithContext(ctx); err != nil {
@@ -449,7 +464,7 @@ func (app *App) shutdown(server gracefulShutdownServer) error {
 		}
 	}
 
-	app.shutdownBackground(timeout)
+	app.shutdownBackground(max(time.Until(deadline), 0))
 	return serverErr
 }
 

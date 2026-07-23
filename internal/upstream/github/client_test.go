@@ -2,10 +2,58 @@ package github
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	return parsed
+}
+
+func TestClientRejectsRedirectOutsideAllowlist(t *testing.T) {
+	t.Parallel()
+
+	destination := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer destination.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, destination.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	httpClient := source.Client()
+	httpClient.CheckRedirect = redirectValidator([]string{"allowed.example"})
+	client := NewClientWithHTTPClient(httpClient)
+	response, err := client.Get(context.Background(), source.URL, "token-a", "")
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if !errors.Is(err, ErrRedirectNotAllowed) {
+		t.Fatalf("expected redirect rejection, got %v", err)
+	}
+}
+
+func TestRedirectValidatorRejectsPlainHTTP(t *testing.T) {
+	t.Parallel()
+
+	err := redirectValidator([]string{"api.github.com"})(
+		&http.Request{URL: mustParseURL(t, "http://api.github.com/path")},
+		nil,
+	)
+	if !errors.Is(err, ErrRedirectNotAllowed) {
+		t.Fatalf("expected plain HTTP redirect rejection, got %v", err)
+	}
+}
 
 type testCooldownObserver struct {
 	calls int
